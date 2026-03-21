@@ -118,11 +118,56 @@ redis:
     port: 6379
 
 # ---------------------------------------------------------------------------
+# Survival Analysis settings (Cox PH via lifelines)
+# ---------------------------------------------------------------------------
+survival:
+  penalizer: 0.01                   # L2 penalizer for Cox PH model
+  l1_ratio: 0.0                     # Elastic net mixing (0=L2 only, 1=L1 only)
+  alpha: 0.05                       # Significance level for confidence intervals
+
+# ---------------------------------------------------------------------------
 # Budget settings (KRW)
 # ---------------------------------------------------------------------------
 budget:
   total_krw: 50000000             # 50,000,000 KRW default
   currency: "KRW"
+
+# ---------------------------------------------------------------------------
+# Budget Optimization settings (LP solver + cost structure)
+# ---------------------------------------------------------------------------
+optimization:
+  total_budget: 50000000            # Total budget constraint (KRW)
+  currency: "KRW"
+  discount_rate: 0.10               # Annual discount rate for NPV (10%)
+  time_horizon_months: 12           # Forward-looking value horizon
+
+  # Per-channel cost configuration
+  channels:
+    email:
+      cost_per_action: 1000         # KRW per email campaign
+      expected_roi_multiplier: 1.0  # Neutral ROI multiplier
+      min_budget: 0                 # No minimum spend requirement
+      max_budget: null              # No cap
+    sms:
+      cost_per_action: 500          # KRW per SMS
+      expected_roi_multiplier: 0.8  # Slightly lower effectiveness
+      min_budget: 0
+      max_budget: null
+    push_notification:
+      cost_per_action: 200          # KRW per push notification
+      expected_roi_multiplier: 0.6  # Lower engagement channel
+      min_budget: 0
+      max_budget: null
+    coupon:
+      cost_per_action: 5000         # KRW per coupon (face value + ops)
+      expected_roi_multiplier: 1.5  # High conversion lift
+      min_budget: 0
+      max_budget: 20000000          # Cap coupon spend at 20M
+    call_center:
+      cost_per_action: 15000        # KRW per outbound call
+      expected_roi_multiplier: 2.0  # Highest effectiveness for at-risk
+      min_budget: 0
+      max_budget: 10000000          # Cap call center at 10M
 
 # ---------------------------------------------------------------------------
 # Drift detection (PSI) settings
