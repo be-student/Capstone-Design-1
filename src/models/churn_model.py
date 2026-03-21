@@ -460,6 +460,31 @@ class MLChurnModel:
             # XGBoost returns 2-column proba
             return self.model.predict_proba(X_arr)[:, 1]
 
+    def evaluate(self, X: pd.DataFrame, y: np.ndarray) -> Dict[str, Any]:
+        """Evaluate model on test data and return metrics dict.
+
+        Args:
+            X: Feature DataFrame.
+            y: True binary labels.
+
+        Returns:
+            Dictionary with auc_roc, accuracy, precision, recall, f1.
+        """
+        from sklearn.metrics import (
+            accuracy_score, f1_score, precision_score, recall_score,
+            roc_auc_score,
+        )
+        proba = self.predict_proba(X)
+        preds = (proba >= 0.5).astype(int)
+        y_arr = np.asarray(y)
+        return {
+            "auc_roc": float(roc_auc_score(y_arr, proba)),
+            "accuracy": float(accuracy_score(y_arr, preds)),
+            "precision": float(precision_score(y_arr, preds, zero_division=0)),
+            "recall": float(recall_score(y_arr, preds, zero_division=0)),
+            "f1": float(f1_score(y_arr, preds, zero_division=0)),
+        }
+
     def get_feature_importance(self) -> np.ndarray:
         """Return feature importance scores.
 
@@ -1058,6 +1083,31 @@ class DLChurnModel:
 
         return probs
 
+    def evaluate(self, X: pd.DataFrame, y: np.ndarray) -> Dict[str, Any]:
+        """Evaluate model on test data and return metrics dict.
+
+        Args:
+            X: Feature DataFrame.
+            y: True binary labels.
+
+        Returns:
+            Dictionary with auc_roc, accuracy, precision, recall, f1.
+        """
+        from sklearn.metrics import (
+            accuracy_score, f1_score, precision_score, recall_score,
+            roc_auc_score,
+        )
+        proba = self.predict_proba(X)
+        preds = (proba >= 0.5).astype(int)
+        y_arr = np.asarray(y)
+        return {
+            "auc_roc": float(roc_auc_score(y_arr, proba)),
+            "accuracy": float(accuracy_score(y_arr, preds)),
+            "precision": float(precision_score(y_arr, preds, zero_division=0)),
+            "recall": float(recall_score(y_arr, preds, zero_division=0)),
+            "f1": float(f1_score(y_arr, preds, zero_division=0)),
+        }
+
     def save(self, path: str) -> None:
         """Save model state to disk.
 
@@ -1168,3 +1218,28 @@ class EnsembleChurnModel:
         dl_probs = self.dl_model.predict_proba(X)
 
         return self.weight_ml * ml_probs + self.weight_dl * dl_probs
+
+    def evaluate(self, X: pd.DataFrame, y: np.ndarray) -> Dict[str, Any]:
+        """Evaluate ensemble model on test data and return metrics dict.
+
+        Args:
+            X: Feature DataFrame.
+            y: True binary labels.
+
+        Returns:
+            Dictionary with auc_roc, accuracy, precision, recall, f1.
+        """
+        from sklearn.metrics import (
+            accuracy_score, f1_score, precision_score, recall_score,
+            roc_auc_score,
+        )
+        proba = self.predict_proba(X)
+        preds = (proba >= 0.5).astype(int)
+        y_arr = np.asarray(y)
+        return {
+            "auc_roc": float(roc_auc_score(y_arr, proba)),
+            "accuracy": float(accuracy_score(y_arr, preds)),
+            "precision": float(precision_score(y_arr, preds, zero_division=0)),
+            "recall": float(recall_score(y_arr, preds, zero_division=0)),
+            "f1": float(f1_score(y_arr, preds, zero_division=0)),
+        }
