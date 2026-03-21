@@ -460,3 +460,203 @@ class TestUpliftReproducibility:
         scores2 = model2.predict_uplift(sample_uplift_data[feature_cols])
 
         np.testing.assert_array_almost_equal(scores1, scores2, decimal=5)
+
+
+# ---------------------------------------------------------------------------
+# Edge case tests
+# ---------------------------------------------------------------------------
+
+class TestUpliftEdgeCases:
+    """Test uplift model edge cases and error handling."""
+
+    def test_predict_before_fit_raises(self, uplift_model, sample_uplift_data):
+        """Predicting before fitting must raise RuntimeError."""
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+        with pytest.raises(RuntimeError):
+            uplift_model.predict_uplift(sample_uplift_data[feature_cols])
+
+    def test_save_before_fit_raises(self, uplift_model, tmp_path):
+        """Saving before fitting must raise RuntimeError."""
+        with pytest.raises(RuntimeError):
+            uplift_model.save(str(tmp_path / "model"))
+
+    def test_small_dataset(self, config):
+        """Model should handle small datasets without crashing."""
+        from src.models.uplift_model import UpliftModel
+        np.random.seed(42)
+        n = 50
+        X = pd.DataFrame(np.random.randn(n, 5),
+                          columns=[f"f{i}" for i in range(5)])
+        treatment = np.random.choice([0, 1], size=n)
+        y = np.random.choice([0, 1], size=n)
+
+        model = UpliftModel(config)
+        model.fit(X=X, treatment=treatment, y=y)
+        scores = model.predict_uplift(X)
+        assert len(scores) == n
+        assert not np.any(np.isnan(scores))
+
+    def test_numpy_array_input(self, config):
+        """Model should accept numpy arrays directly."""
+        from src.models.uplift_model import UpliftModel
+        np.random.seed(42)
+        n = 200
+        X = np.random.randn(n, 10)
+        treatment = np.random.choice([0, 1], size=n)
+        y = np.random.choice([0, 1], size=n)
+
+        model = UpliftModel(config)
+        model.fit(X=X, treatment=treatment, y=y)
+        scores = model.predict_uplift(X)
+        assert len(scores) == n
+
+    def test_fit_returns_self(self, uplift_model, sample_uplift_data):
+        """fit() should return the model instance for chaining."""
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+        result = uplift_model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        assert result is uplift_model
+
+
+# ---------------------------------------------------------------------------
+# S-Learner variant tests
+# ---------------------------------------------------------------------------
+
+class TestSLearner:
+    """Test S-Learner meta-learner variant."""
+
+    def test_s_learner_trains_and_predicts(self, config, sample_uplift_data):
+        """S-Learner should train and produce uplift scores."""
+        from src.models.uplift_model import UpliftModel
+
+        model = UpliftModel(config, learner="s_learner")
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+
+        model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        scores = model.predict_uplift(sample_uplift_data[feature_cols])
+
+        assert len(scores) == len(sample_uplift_data)
+        assert not np.any(np.isnan(scores))
+
+    def test_s_learner_segments(self, config, sample_uplift_data):
+        """S-Learner should produce valid customer segments."""
+        from src.models.uplift_model import UpliftModel
+
+        model = UpliftModel(config, learner="s_learner")
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+
+        model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        scores = model.predict_uplift(sample_uplift_data[feature_cols])
+        segments = model.segment_customers(scores)
+
+        assert len(segments) == len(sample_uplift_data)
+        valid_segments = {"persuadable", "sure_thing", "lost_cause", "sleeping_dog"}
+        assert set(segments).issubset(valid_segments)
+
+    def test_s_learner_persistence(self, config, sample_uplift_data, tmp_path):
+        """S-Learner should save and load correctly."""
+        from src.models.uplift_model import UpliftModel
+
+        model = UpliftModel(config, learner="s_learner")
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+
+        model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        original_scores = model.predict_uplift(sample_uplift_data[feature_cols])
+
+        model.save(str(tmp_path / "s_learner"))
+        loaded = UpliftModel.load(str(tmp_path / "s_learner"))
+        loaded_scores = loaded.predict_uplift(sample_uplift_data[feature_cols])
+
+        np.testing.assert_array_almost_equal(original_scores, loaded_scores, decimal=5)
+
+
+# ---------------------------------------------------------------------------
+# Uplift correlation with true effects tests
+# ---------------------------------------------------------------------------
+
+class TestUpliftQuality:
+    """Test that uplift predictions correlate with true treatment effects."""
+
+    def test_uplift_correlates_with_true_effect(self, uplift_model,
+                                                  sample_uplift_data):
+        """Predicted uplift should positively correlate with true uplift."""
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+        uplift_model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        predicted_uplift = uplift_model.predict_uplift(
+            sample_uplift_data[feature_cols]
+        )
+        true_uplift = sample_uplift_data["true_uplift"].values
+
+        correlation = np.corrcoef(predicted_uplift, true_uplift)[0, 1]
+        assert correlation > 0, (
+            f"Predicted uplift should correlate positively with true uplift, "
+            f"got r={correlation:.4f}"
+        )
+
+    def test_sleeping_dogs_have_negative_uplift(self, uplift_model,
+                                                  sample_uplift_data):
+        """Customers in 'sleeping_dog' segment should have negative uplift."""
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+        uplift_model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        scores = uplift_model.predict_uplift(sample_uplift_data[feature_cols])
+        segments = uplift_model.segment_customers(scores)
+
+        scores_arr = np.array(scores)
+        segments_arr = np.array(segments)
+        sleeping_mask = segments_arr == "sleeping_dog"
+        if sleeping_mask.any():
+            avg_uplift = scores_arr[sleeping_mask].mean()
+            assert avg_uplift < 0, (
+                f"Sleeping dogs should have negative uplift, got {avg_uplift:.4f}"
+            )
+
+    def test_at_least_three_segments_covered(self, uplift_model, sample_uplift_data):
+        """At least 3 of the 4 uplift segments should be represented."""
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+        uplift_model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+        scores = uplift_model.predict_uplift(sample_uplift_data[feature_cols])
+        segments = uplift_model.segment_customers(scores)
+
+        unique_segments = set(segments)
+        valid_segments = {"persuadable", "sure_thing", "lost_cause", "sleeping_dog"}
+        assert unique_segments.issubset(valid_segments), (
+            f"Unexpected segments found: {unique_segments - valid_segments}"
+        )
+        assert len(unique_segments) >= 3, (
+            f"Expected at least 3 segments, got {unique_segments}"
+        )

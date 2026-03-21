@@ -601,3 +601,163 @@ class TestCLVReproducibility:
         preds2 = model2.predict(sample_clv_data[feature_cols])
 
         np.testing.assert_array_almost_equal(preds1, preds2, decimal=5)
+
+
+# ---------------------------------------------------------------------------
+# Edge case tests
+# ---------------------------------------------------------------------------
+
+class TestCLVEdgeCases:
+    """Test CLV model edge cases and error handling."""
+
+    def test_predict_before_fit_raises(self, clv_model, sample_clv_data):
+        """Predicting before fitting must raise RuntimeError."""
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+        with pytest.raises(RuntimeError):
+            clv_model.predict(sample_clv_data[feature_cols])
+
+    def test_fit_returns_self(self, clv_model, sample_clv_data):
+        """fit() should return the model instance for chaining."""
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+        result = clv_model.fit(
+            X=sample_clv_data[feature_cols],
+            y=sample_clv_data["clv_target"],
+        )
+        assert result is clv_model
+
+    def test_single_customer_prediction(self, clv_model, sample_clv_data):
+        """Model should handle single-row predictions."""
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+        clv_model.fit(
+            X=sample_clv_data[feature_cols],
+            y=sample_clv_data["clv_target"],
+        )
+        single_row = sample_clv_data[feature_cols].iloc[[0]]
+        pred = clv_model.predict(single_row)
+        assert len(pred) == 1
+        assert pred[0] >= 0
+
+    def test_zero_budget_allocation(self, clv_model, sample_clv_data):
+        """Zero total budget should allocate zero to all customers."""
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+        clv_model.fit(
+            X=sample_clv_data[feature_cols],
+            y=sample_clv_data["clv_target"],
+        )
+        allocation = clv_model.allocate_budget(
+            customer_ids=sample_clv_data["customer_id"],
+            X=sample_clv_data[feature_cols],
+            total_budget=0,
+        )
+        assert (allocation["allocated_budget"] == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Feature engineering tests (BG/NBD + Gamma-Gamma)
+# ---------------------------------------------------------------------------
+
+class TestCLVFeatureEngineering:
+    """Test BG/NBD and Gamma-Gamma inspired feature engineering."""
+
+    def test_engineer_features_with_rfm(self, sample_clv_data):
+        """Feature engineering should add RFM-derived features."""
+        from src.models.clv_model import CLVModel
+        result = CLVModel._engineer_features(sample_clv_data)
+
+        assert "freq_monetary_interaction" in result.columns
+        assert "recency_frequency_ratio" in result.columns
+        assert "log_monetary" in result.columns
+
+    def test_engineer_features_without_rfm(self):
+        """Feature engineering should work without RFM columns."""
+        from src.models.clv_model import CLVModel
+        df = pd.DataFrame({
+            "feature_a": [1.0, 2.0, 3.0],
+            "feature_b": [4.0, 5.0, 6.0],
+        })
+        result = CLVModel._engineer_features(df)
+
+        # Should not add RFM features if RFM columns are absent
+        assert "freq_monetary_interaction" not in result.columns
+        assert len(result.columns) == 2
+
+    def test_log_monetary_positive(self, sample_clv_data):
+        """log_monetary should produce non-negative values."""
+        from src.models.clv_model import CLVModel
+        result = CLVModel._engineer_features(sample_clv_data)
+        assert (result["log_monetary"] >= 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Churn-adjusted CLV edge case tests
+# ---------------------------------------------------------------------------
+
+class TestCLVChurnEdgeCases:
+    """Test churn-adjusted CLV edge cases."""
+
+    def test_zero_churn_preserves_clv(self):
+        """Zero churn probability should preserve full CLV."""
+        from src.models.clv_model import CLVModel
+        clv = np.array([100.0, 200.0, 300.0])
+        churn = np.array([0.0, 0.0, 0.0])
+        adjusted = CLVModel.adjust_for_churn(clv, churn)
+        np.testing.assert_array_almost_equal(adjusted, clv)
+
+    def test_full_churn_zeroes_clv(self):
+        """Churn probability of 1.0 should zero out CLV."""
+        from src.models.clv_model import CLVModel
+        clv = np.array([100.0, 200.0, 300.0])
+        churn = np.array([1.0, 1.0, 1.0])
+        adjusted = CLVModel.adjust_for_churn(clv, churn)
+        np.testing.assert_array_almost_equal(adjusted, [0.0, 0.0, 0.0])
+
+    def test_adjusted_clv_always_non_negative(self):
+        """Adjusted CLV should always be non-negative."""
+        from src.models.clv_model import CLVModel
+        clv = np.array([100.0, 0.0, 50.0])
+        churn = np.array([0.5, 0.9, 1.1])  # churn > 1 edge case
+        adjusted = CLVModel.adjust_for_churn(clv, churn)
+        assert np.all(adjusted >= 0)
+
+    def test_half_churn_halves_clv(self):
+        """Churn probability of 0.5 should halve CLV."""
+        from src.models.clv_model import CLVModel
+        clv = np.array([100.0, 200.0])
+        churn = np.array([0.5, 0.5])
+        adjusted = CLVModel.adjust_for_churn(clv, churn)
+        np.testing.assert_array_almost_equal(adjusted, [50.0, 100.0])
+
+
+# ---------------------------------------------------------------------------
+# Integration tests (Uplift + CLV)
+# ---------------------------------------------------------------------------
+
+class TestCLVUpliftIntegration:
+    """Test CLV and Uplift model integration patterns."""
+
+    def test_clv_weighted_uplift_ranking(self, config, sample_clv_data):
+        """Should be able to combine CLV predictions with uplift for priority."""
+        from src.models.clv_model import CLVModel
+
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+
+        model = CLVModel(config)
+        model.fit(
+            X=sample_clv_data[feature_cols],
+            y=sample_clv_data["clv_target"],
+        )
+        predictions = model.predict(sample_clv_data[feature_cols])
+
+        # Simulate uplift scores
+        np.random.seed(42)
+        uplift_scores = np.random.randn(len(predictions))
+
+        # Combined priority: CLV * uplift (higher = more valuable to treat)
+        combined = predictions * np.maximum(uplift_scores, 0)
+        assert len(combined) == len(predictions)
+        assert np.all(combined >= 0)
