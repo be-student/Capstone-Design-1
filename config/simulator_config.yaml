@@ -340,7 +340,7 @@ personas:
   - name: "explorer"
     name_kr: "탐색형"
     description: "Exploration-phase customers with high browsing but low purchase frequency"
-    proportion: 0.10
+    proportion: 0.15
     purchase_frequency_monthly: 1.5
     avg_order_value: 55000
     churn_probability: 0.12
@@ -402,7 +402,7 @@ personas:
   - name: "new_customer"
     name_kr: "신규가입자"
     description: "Recently joined customers in the onboarding phase with limited purchase history"
-    proportion: 0.10
+    proportion: 0.15
     purchase_frequency_monthly: 3.5
     avg_order_value: 120000
     churn_probability: 0.15

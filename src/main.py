@@ -402,24 +402,30 @@ def run_optimize(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
     seed = config.get("simulation", {}).get("random_seed", 42)
 
     if uplift_path.exists() and clv_path.exists():
-        uplift_df = pd.read_csv(uplift_path)
-        clv_df = pd.read_csv(clv_path)
-        merged = uplift_df.merge(clv_df, on="customer_id", how="inner")
-        customers = _load_customers(data_dir)
-        churn = customers["churn_label"].astype(float).values[:len(merged)] \
-            if "churn_label" in customers.columns \
-            else np.random.default_rng(seed).uniform(0.1, 0.9, len(merged))
-        rng = np.random.default_rng(seed)
-        inp = pd.DataFrame({
-            "customer_id": merged["customer_id"],
-            "uplift_score": merged["uplift_score"],
-            "clv": merged["predicted_clv"],
-            "churn_prob": churn[:len(merged)],
-            "cost_per_action": np.where(
-                merged["uplift_score"] > 0.1, 70000,
-                np.where(merged["uplift_score"] > 0.02, 30000, 1000)
-            ),
-        })
+        try:
+            uplift_df = pd.read_csv(uplift_path)
+            clv_df = pd.read_csv(clv_path)
+            merged = uplift_df.merge(clv_df, on="customer_id", how="inner")
+            customers = _load_customers(data_dir)
+            n_m = len(merged)
+            churn = customers["churn_label"].astype(float).values[:n_m] \
+                if "churn_label" in customers.columns and len(customers) >= n_m \
+                else np.random.default_rng(seed).uniform(0.1, 0.9, n_m)
+            uplift_col = merged.get("uplift_score", merged.iloc[:, 1]).values
+            clv_col = merged.get("predicted_clv", merged.get("clv", merged.iloc[:, 2])).values
+            inp = pd.DataFrame({
+                "customer_id": merged["customer_id"].values,
+                "uplift_score": uplift_col,
+                "clv": clv_col,
+                "churn_prob": churn[:n_m],
+                "cost_per_action": np.where(
+                    uplift_col > 0.1, 70000,
+                    np.where(uplift_col > 0.02, 30000, 1000)
+                ),
+            })
+        except Exception as exc:
+            logger.warning("Failed to load upstream data (%s) – using synthetic.", exc)
+            uplift_path = Path("/nonexistent")  # force synthetic fallback
     else:
         logger.warning("Upstream results not found – using synthetic data.")
         rng = np.random.default_rng(seed)
