@@ -9,7 +9,7 @@ from src.models.churn_model import (
     EnsembleChurnModel,
     time_based_split,
 )
-from src.models.mlflow_tracking import MLflowTracker
+from src.models.mlflow_tracking import MLflowTracker, ModelRegistry
 from src.models.dl_trainer import DLTrainer, EarlyStopping
 from src.models.shap_explainer import ShapExplainer
 
@@ -24,6 +24,7 @@ __all__ = [
     "EnsembleChurnModel",
     "time_based_split",
     "MLflowTracker",
+    "ModelRegistry",
     "DLTrainer",
     "EarlyStopping",
     "ShapExplainer",

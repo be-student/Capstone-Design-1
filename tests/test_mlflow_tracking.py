@@ -693,3 +693,238 @@ class TestMLflowReproducibility:
         )
 
         mlflow_tracker.end_run()
+
+
+# ---------------------------------------------------------------------------
+# Auto-logging tests
+# ---------------------------------------------------------------------------
+
+class TestAutoLogTraining:
+    """Test auto-logging context manager and auto-log methods."""
+
+    def test_auto_log_training_context_manager(self, mlflow_tracker):
+        """auto_log_training context manager must start and end a run."""
+        with mlflow_tracker.auto_log_training(
+            run_name="auto_test", model_type="xgboost"
+        ) as tracker:
+            assert tracker is not None
+            tracker.log_metrics({"auc": 0.85})
+
+    def test_auto_log_training_logs_config_params(self, mlflow_tracker):
+        """auto_log_training must auto-log config params."""
+        mlflow_tracker.create_experiment(name="auto_config_test")
+        with mlflow_tracker.auto_log_training(
+            run_name="auto_config_run",
+            model_type="lightgbm",
+            experiment_name="auto_config_test",
+        ) as tracker:
+            tracker.log_metrics({"auc": 0.80})
+
+        best = mlflow_tracker.get_best_run(
+            experiment_name="auto_config_test",
+            metric="auc",
+            mode="max",
+        )
+        assert best is not None
+        assert "random_seed" in best["params"]
+
+    def test_auto_log_training_tags_model_type(self, mlflow_tracker):
+        """auto_log_training must tag the run with model_type."""
+        with mlflow_tracker.auto_log_training(
+            run_name="tag_test", model_type="transformer"
+        ):
+            pass
+        # No assertion on tag content since get_best_run doesn't return
+        # tags, but it should not raise.
+
+    def test_auto_log_training_handles_exception(self, mlflow_tracker):
+        """auto_log_training must end the run even if an exception occurs."""
+        with pytest.raises(ValueError):
+            with mlflow_tracker.auto_log_training(
+                run_name="fail_test", model_type="bad"
+            ):
+                raise ValueError("Training failed")
+
+    def test_auto_log_ml_model(self, mlflow_tracker, config, tmp_path):
+        """auto_log_ml_model must log ML model params and metrics."""
+        from unittest.mock import MagicMock
+
+        mock_model = MagicMock()
+        mock_model.model_type = "lightgbm"
+        mock_model.best_params = {"num_leaves": 31, "learning_rate": 0.05}
+        mock_model.cv_scores = {
+            "lightgbm_best_cv_auc": 0.82,
+            "xgboost_best_cv_auc": 0.79,
+            "lightgbm_best_params": {"num_leaves": 31},
+            "xgboost_best_params": {"max_depth": 6},
+        }
+        mock_model.n_folds = 5
+        mock_model.feature_names_ = ["f1", "f2", "f3"]
+        mock_model.get_feature_importance.return_value = [0.5, 0.3, 0.2]
+
+        # Simulate save creating a file
+        def fake_save(path):
+            with open(path + ".joblib", "w") as f:
+                f.write("dummy")
+        mock_model.save = fake_save
+
+        run_id = mlflow_tracker.auto_log_ml_model(
+            model=mock_model,
+            metrics={"auc": 0.82, "f1": 0.71},
+            run_name="auto_ml_test",
+        )
+        assert run_id is not None
+        assert isinstance(run_id, str)
+
+    def test_auto_log_dl_model(self, mlflow_tracker):
+        """auto_log_dl_model must log DL model params and history."""
+        from unittest.mock import MagicMock
+
+        mock_model = MagicMock()
+        mock_model.architecture = "transformer"
+        mock_model.sequence_window = 6
+        mock_model.hidden_size = 64
+        mock_model.num_layers = 2
+        mock_model.dropout = 0.2
+        mock_model.learning_rate = 0.001
+        mock_model.batch_size = 32
+        mock_model.epochs = 10
+
+        history = [
+            {"epoch": 0, "train_loss": 0.69},
+            {"epoch": 1, "train_loss": 0.55},
+            {"epoch": 2, "train_loss": 0.42},
+        ]
+
+        run_id = mlflow_tracker.auto_log_dl_model(
+            model=mock_model,
+            metrics={"auc": 0.78, "accuracy": 0.75},
+            training_history=history,
+            run_name="auto_dl_test",
+        )
+        assert run_id is not None
+
+    def test_auto_log_ensemble(self, mlflow_tracker):
+        """auto_log_ensemble must log ensemble weights and metrics."""
+        from unittest.mock import MagicMock
+
+        mock_ensemble = MagicMock()
+        mock_ensemble.weight_ml = 0.6
+        mock_ensemble.weight_dl = 0.4
+        mock_ensemble.ml_model = MagicMock()
+        mock_ensemble.ml_model.model_type = "lightgbm"
+        mock_ensemble.dl_model = MagicMock()
+        mock_ensemble.dl_model.architecture = "transformer"
+
+        run_id = mlflow_tracker.auto_log_ensemble(
+            ensemble_model=mock_ensemble,
+            metrics={"auc": 0.83, "f1": 0.74},
+            run_name="auto_ensemble_test",
+        )
+        assert run_id is not None
+
+    def test_log_config_artifact(self, mlflow_tracker):
+        """log_config_artifact must log the full config as YAML."""
+        mlflow_tracker.create_experiment(name="config_art_test")
+        mlflow_tracker.start_run(run_name="config_art_run")
+        # Should not raise
+        mlflow_tracker.log_config_artifact()
+        mlflow_tracker.end_run()
+
+    def test_has_auto_log_methods(self, mlflow_tracker):
+        """Tracker must expose all auto-log methods."""
+        assert hasattr(mlflow_tracker, "auto_log_training")
+        assert hasattr(mlflow_tracker, "auto_log_ml_model")
+        assert hasattr(mlflow_tracker, "auto_log_dl_model")
+        assert hasattr(mlflow_tracker, "auto_log_ensemble")
+        assert hasattr(mlflow_tracker, "log_config_artifact")
+
+
+class TestModelTrackerIntegration:
+    """Test that models accept tracker parameter during fit()."""
+
+    def test_ml_model_fit_accepts_tracker(self, config):
+        """MLChurnModel.fit() must accept optional tracker parameter."""
+        from src.models.churn_model import MLChurnModel
+        import inspect
+
+        sig = inspect.signature(MLChurnModel.fit)
+        assert "tracker" in sig.parameters
+
+    def test_dl_model_fit_accepts_tracker(self, config):
+        """DLChurnModel.fit() must accept optional tracker parameter."""
+        from src.models.churn_model import DLChurnModel
+        import inspect
+
+        sig = inspect.signature(DLChurnModel.fit)
+        assert "tracker" in sig.parameters
+
+    def test_ensemble_model_fit_accepts_tracker(self, config):
+        """EnsembleChurnModel.fit() must accept optional tracker parameter."""
+        from src.models.churn_model import EnsembleChurnModel
+        import inspect
+
+        sig = inspect.signature(EnsembleChurnModel.fit)
+        assert "tracker" in sig.parameters
+
+    def test_ml_model_fit_with_tracker(self, mlflow_tracker, config):
+        """MLChurnModel.fit() must log to tracker when provided."""
+        from src.models.churn_model import MLChurnModel
+        np.random.seed(42)
+
+        n = 500
+        X = pd.DataFrame(
+            np.random.randn(n, 10),
+            columns=[f"f{i}" for i in range(10)],
+        )
+        signal = 0.8 * X["f0"] - 0.6 * X["f1"] + np.random.randn(n) * 0.5
+        y = (signal > 0).astype(int).values
+
+        model = MLChurnModel(config)
+        mlflow_tracker.create_experiment(name="ml_fit_tracker_test")
+        mlflow_tracker.start_run(run_name="ml_fit_run")
+
+        model.fit(X, y, tracker=mlflow_tracker)
+
+        mlflow_tracker.end_run()
+
+        best = mlflow_tracker.get_best_run(
+            experiment_name="ml_fit_tracker_test",
+            metric="lightgbm_best_cv_auc",
+            mode="max",
+        )
+        assert best is not None
+        assert best["metric_value"] > 0.5
+
+    def test_dl_model_fit_with_tracker(self, mlflow_tracker, config):
+        """DLChurnModel.fit() must log per-epoch loss to tracker."""
+        from src.models.churn_model import DLChurnModel
+        np.random.seed(42)
+
+        n = 200
+        X = pd.DataFrame(
+            np.random.randn(n, 5),
+            columns=[f"f{i}" for i in range(5)],
+        )
+        y = np.random.randint(0, 2, n)
+
+        # Use minimal epochs for speed
+        test_config = config.copy()
+        test_config["dl_model"] = config.get("dl_model", {}).copy()
+        test_config["dl_model"]["epochs"] = 2
+
+        model = DLChurnModel(test_config)
+        mlflow_tracker.create_experiment(name="dl_fit_tracker_test")
+        mlflow_tracker.start_run(run_name="dl_fit_run")
+
+        model.fit(X, y, tracker=mlflow_tracker)
+
+        mlflow_tracker.end_run()
+
+        best = mlflow_tracker.get_best_run(
+            experiment_name="dl_fit_tracker_test",
+            metric="dl_train_loss",
+            mode="min",
+        )
+        assert best is not None
+        assert best["metric_value"] > 0
