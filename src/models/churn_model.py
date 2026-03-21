@@ -789,12 +789,22 @@ class DLChurnModel:
 
         return torch.tensor(sequences, dtype=torch.float32)
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "DLChurnModel":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        tracker: Optional[Any] = None,
+    ) -> "DLChurnModel":
         """Train the deep learning model.
+
+        When a ``tracker`` (MLflowTracker) is provided, automatically logs
+        per-epoch training loss and architecture parameters to the active
+        MLflow run.
 
         Args:
             X: Feature DataFrame.
             y: Binary labels array.
+            tracker: Optional MLflowTracker with an active run for logging.
 
         Returns:
             self
@@ -808,6 +818,19 @@ class DLChurnModel:
         # Initialize model (Transformer or LSTM based on config)
         self.model = self._build_network(self.input_size_).to(self.device)
         self.network = self.model  # alias
+
+        # Log DL architecture params
+        if tracker is not None:
+            tracker.log_params({
+                "dl_architecture": self.architecture,
+                "dl_sequence_window": self.sequence_window,
+                "dl_hidden_size": self.hidden_size,
+                "dl_num_layers": self.num_layers,
+                "dl_dropout": self.dropout,
+                "dl_learning_rate": self.learning_rate,
+                "dl_batch_size": self.batch_size,
+                "dl_epochs": self.epochs,
+            })
 
         # Create DataLoader
         dataset = TensorDataset(X_tensor, y_tensor)
@@ -825,9 +848,11 @@ class DLChurnModel:
         criterion = nn.BCEWithLogitsLoss()
 
         # Training loop
+        self.training_history: List[Dict[str, float]] = []
         self.model.train()
         for epoch in range(self.epochs):
             epoch_loss = 0.0
+            n_batches = 0
             for batch_X, batch_y in loader:
                 batch_X = batch_X.to(self.device)
                 batch_y = batch_y.to(self.device)
@@ -838,6 +863,19 @@ class DLChurnModel:
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
+                n_batches += 1
+
+            avg_loss = epoch_loss / max(n_batches, 1)
+            self.training_history.append({
+                "epoch": epoch,
+                "train_loss": avg_loss,
+            })
+
+            # Log per-epoch loss to tracker
+            if tracker is not None:
+                tracker.log_metrics(
+                    {"dl_train_loss": avg_loss}, step=epoch
+                )
 
         self.model.eval()
         return self
@@ -929,12 +967,22 @@ class EnsembleChurnModel:
         self.ml_model: Optional[MLChurnModel] = None
         self.dl_model: Optional[DLChurnModel] = None
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "EnsembleChurnModel":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        tracker: Optional[Any] = None,
+    ) -> "EnsembleChurnModel":
         """Train both ML and DL sub-models.
+
+        When a ``tracker`` (MLflowTracker) is provided, it is forwarded
+        to both sub-models for automatic logging of their training
+        parameters and per-step metrics.
 
         Args:
             X: Feature DataFrame.
             y: Binary labels array.
+            tracker: Optional MLflowTracker with an active run.
 
         Returns:
             self
@@ -942,8 +990,8 @@ class EnsembleChurnModel:
         self.ml_model = MLChurnModel(self.config)
         self.dl_model = DLChurnModel(self.config)
 
-        self.ml_model.fit(X, y)
-        self.dl_model.fit(X, y)
+        self.ml_model.fit(X, y, tracker=tracker)
+        self.dl_model.fit(X, y, tracker=tracker)
 
         return self
 
