@@ -333,11 +333,39 @@ class MLChurnModel:
         )
         return self
 
+    @staticmethod
+    def _compute_scale_pos_weight(y: np.ndarray) -> float:
+        """Compute scale_pos_weight for imbalanced binary classification.
+
+        Calculates the ratio of negative to positive samples, which is used
+        by XGBoost's ``scale_pos_weight`` parameter to handle class imbalance.
+
+        Args:
+            y: Binary label array (0 = negative, 1 = positive).
+
+        Returns:
+            Ratio of negatives to positives. Returns 1.0 if either class
+            has zero samples to avoid division by zero.
+        """
+        n_pos = int(np.sum(y == 1))
+        n_neg = int(np.sum(y == 0))
+        if n_pos == 0 or n_neg == 0:
+            return 1.0
+        ratio = n_neg / n_pos
+        logger.info(
+            "Class imbalance: n_neg=%d, n_pos=%d, scale_pos_weight=%.4f",
+            n_neg, n_pos, ratio,
+        )
+        return float(ratio)
+
     def _train_lightgbm_final(
         self, X: np.ndarray, y: np.ndarray,
         params_entry: Dict[str, Any],
     ) -> None:
         """Retrain the best LightGBM config on full training data.
+
+        Applies ``is_unbalance=True`` automatically when the positive class
+        rate is below 30% to improve recall on the minority (churn) class.
 
         Args:
             X: Full training feature matrix.
@@ -348,6 +376,15 @@ class MLChurnModel:
 
         num_boost_round = params_entry.get("num_boost_round", 200)
         p = {k: v for k, v in params_entry.items() if k != "num_boost_round"}
+
+        # Handle class imbalance: use is_unbalance when positive rate < 30%
+        pos_rate = float(np.mean(y == 1))
+        is_unbalance = pos_rate < 0.30
+        logger.info(
+            "LightGBM final train: pos_rate=%.4f, is_unbalance=%s",
+            pos_rate, is_unbalance,
+        )
+
         params = {
             "objective": "binary",
             "metric": "auc",
@@ -355,6 +392,7 @@ class MLChurnModel:
             "seed": self.seed,
             "deterministic": True,
             "bagging_freq": 5,
+            "is_unbalance": is_unbalance,
             **p,
         }
 
@@ -375,6 +413,9 @@ class MLChurnModel:
     ) -> None:
         """Retrain the best XGBoost config on full training data.
 
+        Automatically sets ``scale_pos_weight`` based on the negative-to-positive
+        ratio in ``y`` to handle class imbalance.
+
         Args:
             X: Full training feature matrix.
             y: Full training labels.
@@ -384,6 +425,9 @@ class MLChurnModel:
 
         n_estimators = params_entry.get("n_estimators", 200)
         p = {k: v for k, v in params_entry.items() if k != "n_estimators"}
+
+        scale_pos_weight = self._compute_scale_pos_weight(y)
+
         self._xgb_model = XGBClassifier(
             n_estimators=n_estimators,
             objective="binary:logistic",
@@ -391,6 +435,7 @@ class MLChurnModel:
             use_label_encoder=False,
             random_state=self.seed,
             verbosity=0,
+            scale_pos_weight=scale_pos_weight,
             **p,
         )
         self._xgb_model.fit(X, y, verbose=False)
@@ -484,6 +529,118 @@ class MLChurnModel:
         else:
             instance._lgb_model = instance.model
         return instance
+
+
+# ---------------------------------------------------------------------------
+# Utility: threshold analysis
+# ---------------------------------------------------------------------------
+
+def analyze_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+) -> Dict[str, Any]:
+    """Analyze Precision, Recall, and F1 across classification thresholds.
+
+    Computes the Precision-Recall curve and evaluates Precision, Recall, and
+    F1 score at a range of thresholds. Selects the optimal threshold for a
+    churn-prediction business objective: maximising F1 score while keeping
+    Recall >= 0.60 (i.e. capturing the majority of actual churners).
+
+    The function also logs a summary table of key threshold values to the
+    module logger at INFO level.
+
+    Args:
+        y_true: Binary ground-truth labels (0 = no churn, 1 = churn).
+        y_prob: Predicted churn probabilities in [0, 1].
+
+    Returns:
+        Dictionary with the following keys:
+
+        - ``"thresholds"`` (List[float]): Evaluated threshold values.
+        - ``"precision"`` (List[float]): Precision at each threshold.
+        - ``"recall"`` (List[float]): Recall at each threshold.
+        - ``"f1"`` (List[float]): F1 score at each threshold.
+        - ``"optimal_threshold"`` (float): Selected threshold.
+        - ``"optimal_precision"`` (float): Precision at optimal threshold.
+        - ``"optimal_recall"`` (float): Recall at optimal threshold.
+        - ``"optimal_f1"`` (float): F1 at optimal threshold.
+
+    Example:
+        >>> result = analyze_threshold(y_test, model.predict_proba(X_test))
+        >>> print(result["optimal_threshold"])
+    """
+    from sklearn.metrics import precision_recall_curve
+
+    y_true_arr = np.asarray(y_true).ravel()
+    y_prob_arr = np.asarray(y_prob).ravel()
+
+    # precision_recall_curve returns arrays indexed by threshold;
+    # the last entry has no corresponding threshold (appended sentinel).
+    precision_arr, recall_arr, thresholds_arr = precision_recall_curve(
+        y_true_arr, y_prob_arr
+    )
+
+    # Drop the sentinel entry so lengths match
+    precision_arr = precision_arr[:-1]
+    recall_arr = recall_arr[:-1]
+
+    # Compute F1 at every threshold, guarding against zero denominators.
+    # Use a safe denominator (minimum 1e-9) to avoid RuntimeWarning from
+    # division; the np.where mask ensures zero F1 is returned when denom == 0.
+    denom = precision_arr + recall_arr
+    safe_denom = np.where(denom > 0, denom, 1e-9)
+    f1_arr = np.where(
+        denom > 0,
+        2.0 * precision_arr * recall_arr / safe_denom,
+        0.0,
+    )
+
+    thresholds_list = thresholds_arr.tolist()
+    precision_list = precision_arr.tolist()
+    recall_list = recall_arr.tolist()
+    f1_list = f1_arr.tolist()
+
+    # Business rule: maximise F1 among thresholds where Recall >= 0.60.
+    # If no threshold satisfies the recall floor, fall back to global F1 max.
+    MIN_RECALL = 0.60
+    eligible_mask = recall_arr >= MIN_RECALL
+    if eligible_mask.any():
+        candidate_indices = np.where(eligible_mask)[0]
+        best_idx = candidate_indices[np.argmax(f1_arr[eligible_mask])]
+    else:
+        best_idx = int(np.argmax(f1_arr))
+
+    optimal_threshold = float(thresholds_arr[best_idx])
+    optimal_precision = float(precision_arr[best_idx])
+    optimal_recall = float(recall_arr[best_idx])
+    optimal_f1 = float(f1_arr[best_idx])
+
+    logger.info(
+        "Threshold analysis: optimal=%.4f  P=%.4f  R=%.4f  F1=%.4f",
+        optimal_threshold, optimal_precision, optimal_recall, optimal_f1,
+    )
+
+    # Log a summary table at key percentiles
+    for pct in [0.1, 0.3, 0.5, 0.7, 0.9]:
+        idx = int(pct * (len(thresholds_list) - 1))
+        logger.info(
+            "  thr=%.3f  P=%.3f  R=%.3f  F1=%.3f",
+            thresholds_list[idx],
+            precision_list[idx],
+            recall_list[idx],
+            f1_list[idx],
+        )
+
+    return {
+        "thresholds": thresholds_list,
+        "precision": precision_list,
+        "recall": recall_list,
+        "f1": f1_list,
+        "optimal_threshold": optimal_threshold,
+        "optimal_precision": optimal_precision,
+        "optimal_recall": optimal_recall,
+        "optimal_f1": optimal_f1,
+    }
 
 
 # ---------------------------------------------------------------------------

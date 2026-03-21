@@ -24,6 +24,7 @@ Usage:
 """
 
 import logging
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib
@@ -900,3 +901,209 @@ class CohortAnalyzer:
             "summary": summary,
             "metrics": metrics,
         }
+
+
+def extract_churn_sequences(
+    events_df: pd.DataFrame,
+    customers_df: pd.DataFrame,
+    n_days: int = 30,
+    top_n: int = 5,
+) -> List[Tuple[str, int]]:
+    """Extract common event-type sequences from churned customers' last N days.
+
+    For each churned customer, collects the event types observed in the final
+    ``n_days`` of activity ordered chronologically, converts each customer's
+    sequence to a single whitespace-separated string, then counts how often
+    each unique sequence appears across all churned customers.
+
+    Args:
+        events_df: DataFrame with columns ``customer_id``, ``event_type``,
+            and ``event_date`` (str or datetime).
+        customers_df: DataFrame with columns ``customer_id`` and
+            ``churn_label`` (1 = churned, 0 = active).
+        n_days: Number of days before each churned customer's last event to
+            include. Defaults to 30.
+        top_n: Number of most-common sequences to return. Defaults to 5.
+
+    Returns:
+        List of ``(sequence_string, count)`` tuples for the top ``top_n``
+        most common pre-churn event sequences, ordered by descending
+        frequency.
+    """
+    events = events_df.copy()
+    events["event_date"] = pd.to_datetime(events["event_date"])
+
+    churned_ids = customers_df.loc[
+        customers_df["churn_label"] == 1, "customer_id"
+    ]
+    churned_events = events[events["customer_id"].isin(churned_ids)]
+
+    sequences: List[str] = []
+    for customer_id, group in churned_events.groupby("customer_id"):
+        group = group.sort_values("event_date")
+        last_date = group["event_date"].max()
+        cutoff = last_date - pd.Timedelta(days=n_days)
+        window = group[group["event_date"] >= cutoff]
+        seq = " -> ".join(window["event_type"].tolist())
+        if seq:
+            sequences.append(seq)
+
+    counter = Counter(sequences)
+    top = counter.most_common(top_n)
+    logger.info(
+        "extract_churn_sequences: %d churned customers, top %d sequences extracted",
+        len(sequences),
+        len(top),
+    )
+    return top
+
+
+def analyze_pre_churn_events(
+    events_df: pd.DataFrame,
+    customers_df: pd.DataFrame,
+    n_days: int = 30,
+) -> pd.DataFrame:
+    """Analyze event-type frequencies in the pre-churn window for churned vs active customers.
+
+    For each customer (churned and active), counts how many times each event
+    type occurs in their most recent ``n_days`` of activity. Compares the
+    mean frequency per event type between the two groups.
+
+    Args:
+        events_df: DataFrame with columns ``customer_id``, ``event_type``,
+            and ``event_date`` (str or datetime).
+        customers_df: DataFrame with columns ``customer_id`` and
+            ``churn_label`` (1 = churned, 0 = active).
+        n_days: Lookback window in days from each customer's last event.
+            Defaults to 30.
+
+    Returns:
+        DataFrame indexed by ``event_type`` with columns:
+
+        - ``churned_freq``: Mean event count per churned customer.
+        - ``active_freq``: Mean event count per active customer.
+        - ``freq_ratio``: ``churned_freq / active_freq`` (NaN when
+          ``active_freq`` is 0).
+    """
+    events = events_df.copy()
+    events["event_date"] = pd.to_datetime(events["event_date"])
+
+    churn_map = customers_df.set_index("customer_id")["churn_label"]
+
+    # Compute each customer's last event date
+    last_dates = events.groupby("customer_id")["event_date"].max()
+
+    # Keep only events within the n_days window before each customer's last date
+    events = events.join(last_dates.rename("last_date"), on="customer_id")
+    events = events[
+        events["event_date"] >= events["last_date"] - pd.Timedelta(days=n_days)
+    ]
+
+    # Count events per customer per event type
+    counts = (
+        events.groupby(["customer_id", "event_type"])
+        .size()
+        .reset_index(name="count")
+    )
+    counts["churn_label"] = counts["customer_id"].map(churn_map)
+    counts = counts.dropna(subset=["churn_label"])
+
+    churned_counts = counts[counts["churn_label"] == 1]
+    active_counts = counts[counts["churn_label"] == 0]
+
+    churned_freq = (
+        churned_counts.groupby("event_type")["count"].mean().rename("churned_freq")
+    )
+    active_freq = (
+        active_counts.groupby("event_type")["count"].mean().rename("active_freq")
+    )
+
+    result = pd.concat([churned_freq, active_freq], axis=1).fillna(0.0)
+    result["freq_ratio"] = result["churned_freq"] / result["active_freq"].replace(
+        0, float("nan")
+    )
+    result = result.sort_values("churned_freq", ascending=False)
+
+    logger.info(
+        "analyze_pre_churn_events: %d event types analysed over %d-day window",
+        len(result),
+        n_days,
+    )
+    return result
+
+
+def compute_journey_funnel(
+    customers_df: pd.DataFrame,
+    events_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compute a customer journey funnel across five lifecycle stages.
+
+    Stages (in order):
+        1. **Signup** – all customers in ``customers_df``.
+        2. **First Purchase** – customers with at least one ``purchase`` event.
+        3. **Repeat Purchase** – customers with two or more ``purchase`` events.
+        4. **Loyal** – customers with five or more ``purchase`` events.
+        5. **Churned** – customers whose ``churn_label`` equals 1.
+
+    Args:
+        customers_df: DataFrame with columns ``customer_id`` and
+            ``churn_label`` (1 = churned, 0 = active).
+        events_df: DataFrame with columns ``customer_id`` and ``event_type``.
+
+    Returns:
+        DataFrame with one row per stage and the following columns:
+
+        - ``stage``: Stage name string.
+        - ``count``: Number of customers who reached this stage.
+        - ``conversion_rate``: Fraction of all customers who reached this
+          stage (relative to the Signup stage).
+        - ``drop_off_rate``: Fraction of customers who did *not* proceed from
+          the previous stage to this one (0.0 for the Signup stage).
+    """
+    purchases = events_df[events_df["event_type"] == "purchase"]
+    purchase_counts = purchases.groupby("customer_id").size()
+
+    all_customers = set(customers_df["customer_id"])
+    first_purchase = set(purchase_counts[purchase_counts >= 1].index) & all_customers
+    repeat_purchase = set(purchase_counts[purchase_counts >= 2].index) & all_customers
+    loyal = set(purchase_counts[purchase_counts >= 5].index) & all_customers
+    churned = set(
+        customers_df.loc[customers_df["churn_label"] == 1, "customer_id"]
+    )
+
+    stages = [
+        ("Signup", len(all_customers)),
+        ("First Purchase", len(first_purchase)),
+        ("Repeat Purchase", len(repeat_purchase)),
+        ("Loyal", len(loyal)),
+        ("Churned", len(churned)),
+    ]
+
+    total = stages[0][1] if stages[0][1] > 0 else 1
+    rows = []
+    for i, (stage, count) in enumerate(stages):
+        conversion_rate = count / total
+        if i == 0:
+            drop_off_rate = 0.0
+        else:
+            prev_count = stages[i - 1][1]
+            drop_off_rate = (
+                (prev_count - count) / prev_count if prev_count > 0 else 0.0
+            )
+        rows.append(
+            {
+                "stage": stage,
+                "count": count,
+                "conversion_rate": round(conversion_rate, 4),
+                "drop_off_rate": round(drop_off_rate, 4),
+            }
+        )
+
+    funnel = pd.DataFrame(rows)
+    logger.info(
+        "compute_journey_funnel: %d stages, signup=%d churned=%d",
+        len(funnel),
+        total,
+        len(churned),
+    )
+    return funnel

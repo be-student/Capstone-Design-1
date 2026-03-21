@@ -22,6 +22,10 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend; safe for script/server use
+import matplotlib.pyplot as plt
+
 logger = logging.getLogger(__name__)
 
 
@@ -384,3 +388,113 @@ class UpliftModel:
 
         logger.info("Uplift model loaded from %s", load_path)
         return model
+
+
+# ---------------------------------------------------------------------------
+# Utility: Qini Curve visualisation
+# ---------------------------------------------------------------------------
+
+def plot_qini_curve(
+    y_true: Union[np.ndarray, "pd.Series"],
+    uplift_scores: Union[np.ndarray, list],
+    treatment: Union[np.ndarray, "pd.Series"],
+    save_path: Optional[str] = None,
+) -> None:
+    """Plot the Qini Curve for an uplift model.
+
+    The Qini Curve measures the incremental gain from targeting customers
+    in order of their predicted uplift score, compared to a random baseline.
+
+    The y-axis shows the cumulative incremental conversions (treated
+    positives minus the proportional share of control positives).
+    The x-axis shows the fraction of the population targeted.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Binary outcome labels (1 = churn / converted, 0 = no churn).
+    uplift_scores : array-like of shape (n_samples,)
+        Predicted uplift scores from :meth:`UpliftModel.predict_uplift`.
+        Higher values indicate customers expected to benefit most.
+    treatment : array-like of shape (n_samples,)
+        Binary treatment indicator (1 = treated, 0 = control).
+    save_path : str, optional
+        File path to save the figure (e.g. ``"results/qini_curve.png"``).
+        Supported formats: PNG, PDF, SVG (inferred from extension).
+        If ``None``, the figure is displayed interactively instead.
+
+    Returns
+    -------
+    None
+
+    Example
+    -------
+    >>> plot_qini_curve(y_test, uplift_scores, treatment,
+    ...                 save_path="results/qini_curve.png")
+    """
+    y_arr = np.asarray(y_true).ravel()
+    scores_arr = np.asarray(uplift_scores).ravel()
+    treatment_arr = np.asarray(treatment).ravel()
+
+    n = len(y_arr)
+    n_treatment = treatment_arr.sum()
+    n_control = n - n_treatment
+
+    if n_treatment == 0 or n_control == 0:
+        logger.warning("Cannot plot Qini Curve: treatment or control group is empty.")
+        return
+
+    # Sort by descending uplift score
+    order = np.argsort(-scores_arr)
+    y_sorted = y_arr[order]
+    t_sorted = treatment_arr[order]
+
+    # Cumulative treated / control positives at each rank
+    cum_treat_pos = np.cumsum(y_sorted * t_sorted)
+    cum_ctrl_pos = np.cumsum(y_sorted * (1 - t_sorted))
+    cum_treat_cnt = np.cumsum(t_sorted)
+    cum_ctrl_cnt = np.cumsum(1 - t_sorted)
+
+    # Qini value at each rank k:
+    #   Q(k) = (treated positives up to k)
+    #          - (control positives up to k) * (treated count / control count)
+    # Guard against zero control count.
+    # Use a safe divisor (minimum 1) to avoid RuntimeWarning from division;
+    # the np.where mask ensures treat_ratio is 0 when no control units exist.
+    safe_ctrl_cnt = np.where(cum_ctrl_cnt > 0, cum_ctrl_cnt, 1)
+    treat_ratio = np.where(
+        cum_ctrl_cnt > 0,
+        cum_treat_cnt / safe_ctrl_cnt,
+        0.0,
+    )
+    qini_values = cum_treat_pos - cum_ctrl_pos * treat_ratio
+
+    fractions = np.arange(1, n + 1) / n
+
+    # Random baseline: linear from 0 to final Qini value
+    random_baseline = np.linspace(0, qini_values[-1], n)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    ax.plot(fractions, qini_values, color="steelblue", linewidth=2,
+            label="Uplift model")
+    ax.plot(fractions, random_baseline, color="grey", linewidth=1.5,
+            linestyle="--", label="Random targeting")
+    ax.fill_between(fractions, random_baseline, qini_values,
+                    alpha=0.15, color="steelblue")
+
+    ax.set_xlabel("Fraction of population targeted", fontsize=12)
+    ax.set_ylabel("Cumulative incremental conversions (Qini)", fontsize=12)
+    ax.set_title("Qini Curve", fontsize=14)
+    ax.legend(fontsize=11)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    fig.tight_layout()
+
+    if save_path is not None:
+        out = Path(save_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=150)
+        logger.info("Qini Curve saved to %s", out)
+        plt.close(fig)
+    else:
+        plt.show()

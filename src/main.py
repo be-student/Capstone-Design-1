@@ -276,7 +276,7 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
 
 def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Train uplift model and produce 4-quadrant segmentation CSV."""
-    from src.models.uplift_model import UpliftModel
+    from src.models.uplift_model import UpliftModel, plot_qini_curve
 
     data_dir, results_dir, models_dir = _resolve_dirs(args)
     customers = _load_customers(data_dir)
@@ -312,6 +312,9 @@ def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     out.to_csv(results_dir / "uplift_results.csv", index=False)
     model.save(str(models_dir / "uplift_model.pkl"))
     logger.info("Uplift results saved to %s", results_dir / "uplift_results.csv")
+
+    qini_path = str(results_dir / "qini_curve.png")
+    plot_qini_curve(y, scores, treatment, save_path=qini_path)
 
     return {"mode": "uplift", "status": "completed", "auuc": float(auuc),
             "segment_distribution": seg_dist.to_dict()}
@@ -560,6 +563,14 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
         out["retention_matrix_shape"] = list(retention.shape)
         retention.to_csv(results_dir / "cohort_retention_matrix.csv")
         logger.info("Retention matrix: %d cohorts", len(retention))
+
+        heatmap_path = str(results_dir / "cohort_retention_heatmap.png")
+        analyzer.plot_retention_heatmap(retention, save_path=heatmap_path)
+        logger.info("Retention heatmap saved to %s", heatmap_path)
+
+        lines_path = str(results_dir / "cohort_retention_curves.png")
+        analyzer.plot_retention_lines(retention, save_path=lines_path)
+        logger.info("Retention curves saved to %s", lines_path)
 
     _save_json(out, results_dir / "cohort_analysis.json")
     return out
