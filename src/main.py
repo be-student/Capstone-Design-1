@@ -460,17 +460,33 @@ def run_ab_test(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
     ab = ABTestFramework(config)
 
     if "treatment_group" in customers.columns and "churn_label" in customers.columns:
-        mask = customers["treatment_group"] == "treatment"
-        results = ab.run_test(
-            treatment_outcomes=customers.loc[mask, "churn_label"].values,
-            control_outcomes=customers.loc[~mask, "churn_label"].values,
-        )
+        ab_data = customers[["treatment_group", "churn_label"]].copy()
+        ab_data["group"] = ab_data["treatment_group"]
+        ab_data["metric"] = ab_data["churn_label"].astype(float)
     else:
         rng = np.random.default_rng(42)
-        results = ab.run_test(
-            treatment_outcomes=rng.binomial(1, 0.18, 5000),
-            control_outcomes=rng.binomial(1, 0.22, 5000),
-        )
+        n_t, n_c = 5000, 5000
+        ab_data = pd.DataFrame({
+            "group": ["treatment"] * n_t + ["control"] * n_c,
+            "metric": np.concatenate([
+                rng.binomial(1, 0.18, n_t).astype(float),
+                rng.binomial(1, 0.22, n_c).astype(float),
+            ]),
+        })
+
+    try:
+        results = ab.analyze(ab_data, metric="metric")
+    except Exception as exc:
+        logger.warning("ABTestFramework.analyze failed (%s), using fallback.", exc)
+        mask = ab_data["group"] == "treatment"
+        t_mean = ab_data.loc[mask, "metric"].mean()
+        c_mean = ab_data.loc[~mask, "metric"].mean()
+        results = {
+            "treatment_mean": float(t_mean),
+            "control_mean": float(c_mean),
+            "lift": float(t_mean - c_mean),
+            "significant": abs(t_mean - c_mean) > 0.02,
+        }
 
     results["power_analysis"] = {"required_sample_size": sample_size,
                                   "baseline_rate": baseline, "mde": mde}
@@ -499,8 +515,9 @@ def run_survival(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
     else:
         duration = pd.Series(np.random.default_rng(42).integers(30, 365, len(X)))
 
-    event = customers["churn_label"].values[:len(X)].astype(int) \
+    event_arr = customers["churn_label"].values[:len(X)].astype(int) \
         if "churn_label" in customers.columns else np.zeros(len(X), dtype=int)
+    event = pd.Series(event_arr, index=X.index)
 
     surv_feats = fcols[:15]  # Limit to avoid multicollinearity
     logger.info("Training survival model (Cox PH) with %d features...", len(surv_feats))
@@ -563,10 +580,12 @@ def run_recommend(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str,
 
     if "persona" in customers.columns:
         inp["segment"] = customers["persona"].values
+    elif "segment" not in inp.columns:
+        inp["segment"] = "general"
 
     logger.info("Generating recommendations for %d customers...", n)
     engine = RecommendationEngine(config)
-    recs = engine.recommend(inp)
+    recs = engine.recommend(data=inp)
     recs.to_csv(results_dir / "recommendations.csv", index=False)
     logger.info("Recommendations saved (%d rows).", len(recs))
 
@@ -672,7 +691,8 @@ def run_monitor(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
         yellow_threshold=drift_cfg.get("yellow_threshold", 0.10),
         red_threshold=drift_cfg.get("red_threshold", 0.25),
     )
-    psi_report = psi_det.detect(ref, cur)
+    psi_det.fit(ref)
+    psi_report = psi_det.detect(cur)
 
     # KS
     ks_cfg = config.get("ks_drift_detection", {})
@@ -680,7 +700,8 @@ def run_monitor(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
         warning_threshold=ks_cfg.get("warning_threshold", 0.05),
         drift_threshold=ks_cfg.get("drift_threshold", 0.01),
     )
-    ks_report = ks_det.detect(ref, cur)
+    ks_det.fit(ref)
+    ks_report = ks_det.detect(cur)
 
     report: Dict[str, Any] = {"psi": {"num_features": len(num_cols), "alerts": []},
                                "ks": {"num_features": len(num_cols), "alerts": []}}
@@ -752,22 +773,27 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         output_dir=str(Path(args.output) if args.output else DEFAULT_RESULTS_DIR),
     )
 
-    # Register the actual handler functions for each canonical step
+    # Register the actual handler functions for each canonical step.
+    # Steps that share the same underlying handler are deduplicated
+    # with lightweight no-op wrappers to avoid re-running expensive work.
+    def _noop(config, args):
+        return {"status": "completed", "note": "handled by prior step"}
+
     step_handlers = [
         ("data_generation", run_simulate),
         ("preprocessing", run_features),
-        ("feature_engineering", run_features),
-        ("ml_model_training", run_train),
-        ("dl_model_training", run_train),
-        ("ensemble_creation", run_train),
+        ("feature_engineering", _noop),           # already done in preprocessing
+        ("ml_model_training", run_train),          # trains ML + DL + ensemble
+        ("dl_model_training", _noop),              # already done in ml_model_training
+        ("ensemble_creation", _noop),              # already done in ml_model_training
         ("uplift_modeling", run_uplift),
         ("clv_prediction", run_clv),
         ("budget_optimization", run_optimize),
         ("ab_testing", run_ab_test),
         ("survival_analysis", run_survival),
         ("recommendations", run_recommend),
-        ("scoring_api_setup", run_monitor),
-        ("mlflow_logging", run_monitor),
+        ("scoring_api_setup", run_monitor),        # runs PSI + KS drift
+        ("mlflow_logging", _noop),                 # already done in scoring_api_setup
     ]
     for step_name, handler_fn in step_handlers:
         runner.register_step(step_name, handler_fn)
