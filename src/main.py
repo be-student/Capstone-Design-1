@@ -149,9 +149,30 @@ def _load_events(data_dir: Path) -> pd.DataFrame:
     raise FileNotFoundError(f"No event data in {data_dir}. Run --mode simulate first.")
 
 
+_FEATURE_CACHE: Optional[pd.DataFrame] = None
+
+
 def _compute_features(config: Dict, customers: pd.DataFrame,
                        events: pd.DataFrame) -> pd.DataFrame:
-    """Run feature engineering and return feature DataFrame."""
+    """Run feature engineering and return feature DataFrame.
+
+    Caches the result for repeated calls within the same pipeline run
+    to avoid recomputing from 476K+ events each time (~100s per call).
+    """
+    global _FEATURE_CACHE  # noqa: PLW0603
+
+    # Try loading from cached CSV first (written by run_features)
+    cached_path = DEFAULT_RESULTS_DIR / "features.csv"
+
+    if _FEATURE_CACHE is not None:
+        logger.info("Using in-memory feature cache (%d rows)", len(_FEATURE_CACHE))
+        return _FEATURE_CACHE.copy()
+
+    if cached_path.exists():
+        logger.info("Loading cached features from %s", cached_path)
+        _FEATURE_CACHE = pd.read_csv(cached_path)
+        return _FEATURE_CACHE.copy()
+
     from src.features import FeatureEngineer
 
     fe = FeatureEngineer(config)
@@ -159,6 +180,7 @@ def _compute_features(config: Dict, customers: pd.DataFrame,
     start = config.get("simulation", {}).get("start_date", "2024-01-01")
     ref_date = pd.Timestamp(start) + pd.Timedelta(days=sim_days)
     features = fe.compute_all_features(customers, events, str(ref_date.date()))
+    _FEATURE_CACHE = features
     return features
 
 
@@ -387,11 +409,16 @@ def run_optimize(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
         churn = customers["churn_label"].astype(float).values[:len(merged)] \
             if "churn_label" in customers.columns \
             else np.random.default_rng(seed).uniform(0.1, 0.9, len(merged))
+        rng = np.random.default_rng(seed)
         inp = pd.DataFrame({
             "customer_id": merged["customer_id"],
             "uplift_score": merged["uplift_score"],
             "clv": merged["predicted_clv"],
             "churn_prob": churn[:len(merged)],
+            "cost_per_action": np.where(
+                merged["uplift_score"] > 0.1, 70000,
+                np.where(merged["uplift_score"] > 0.02, 30000, 1000)
+            ),
         })
     else:
         logger.warning("Upstream results not found – using synthetic data.")
@@ -402,6 +429,7 @@ def run_optimize(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
             "uplift_score": rng.uniform(0, 0.3, n),
             "clv": rng.uniform(10000, 500000, n),
             "churn_prob": rng.uniform(0.05, 0.95, n),
+            "cost_per_action": rng.uniform(5000, 50000, n),
         })
 
     opt = BudgetOptimizer(config)
