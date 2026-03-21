@@ -74,7 +74,7 @@ def sample_customer_data():
     # Customer segments
     segments = np.random.choice(
         ["vip_loyal", "regular_loyal", "bargain_hunter",
-         "new_customer", "dormant", "high_value_at_risk"],
+         "explorer", "dormant", "new_customer"],
         size=n,
     )
 

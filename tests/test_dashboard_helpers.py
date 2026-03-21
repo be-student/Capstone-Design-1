@@ -51,7 +51,7 @@ def sample_predictions():
         ),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"], n,
+             "explorer", "dormant", "new_customer"], n,
         ),
         "clv_predicted": np.random.lognormal(11, 1, n),
     })

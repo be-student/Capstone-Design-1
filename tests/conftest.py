@@ -303,7 +303,7 @@ def sample_customer_data() -> pd.DataFrame:
     email_opt_in = np.random.choice([0, 1], size=n, p=[0.1, 0.9])
     segments = np.random.choice(
         ["vip_loyal", "regular_loyal", "bargain_hunter",
-         "new_customer", "dormant", "high_value_at_risk"],
+         "explorer", "dormant", "new_customer"],
         size=n,
     )
 
@@ -522,7 +522,7 @@ def sample_churn_predictions() -> pd.DataFrame:
         ),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"],
+             "explorer", "dormant", "new_customer"],
             n,
         ),
         "recommended_action": np.random.choice(
@@ -575,7 +575,7 @@ def sample_budget_results() -> pd.DataFrame:
     """Sample budget optimization results for dashboard display tests."""
     return pd.DataFrame({
         "segment": ["vip_loyal", "regular_loyal", "bargain_hunter",
-                     "new_customer", "dormant", "high_value_at_risk"],
+                     "explorer", "dormant", "new_customer"],
         "allocated_budget_krw": [5_000_000, 12_000_000, 8_000_000,
                                   10_000_000, 3_000_000, 12_000_000],
         "expected_retained_customers": [50, 120, 80, 100, 30, 60],

@@ -1495,9 +1495,9 @@ def render_survival_analysis(st_module, config: Dict, data_loader=None):
         "vip_loyal": "#2ecc71",
         "regular_loyal": "#3498db",
         "bargain_hunter": "#e67e22",
-        "new_customer": "#9b59b6",
+        "explorer": "#9b59b6",
         "dormant": "#e74c3c",
-        "high_value_at_risk": "#f39c12",
+        "new_customer": "#f39c12",
     }
 
     fig_km = go.Figure()
@@ -4725,6 +4725,12 @@ def main():
     st.sidebar.markdown(
         f"- ML: {ew['ml']} | DL: {ew['dl']}"
     )
+
+    # Manual refresh button
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
     # Route to page
     page_map = {

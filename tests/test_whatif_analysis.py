@@ -58,7 +58,7 @@ def sample_customer_data():
         "expected_retention_lift": expected_retention_lift,
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"],
+             "explorer", "dormant", "new_customer"],
             size=n,
         ),
     })

@@ -63,7 +63,7 @@ def sample_churn_predictions():
         ),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"],
+             "explorer", "dormant", "new_customer"],
             n,
         ),
         "recommended_action": np.random.choice(
@@ -125,7 +125,7 @@ def sample_budget_results():
     """Create sample budget optimization results for dashboard display."""
     return pd.DataFrame({
         "segment": ["vip_loyal", "regular_loyal", "bargain_hunter",
-                     "new_customer", "dormant", "high_value_at_risk"],
+                     "explorer", "dormant", "new_customer"],
         "allocated_budget_krw": [5000000, 12000000, 8000000,
                                  10000000, 3000000, 12000000],
         "expected_retained": [450, 1800, 1200, 1500, 200, 850],
@@ -148,7 +148,7 @@ def sample_survival_data():
         "event_observed": np.random.binomial(1, 0.3, n),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"],
+             "explorer", "dormant", "new_customer"],
             n,
         ),
         "survival_probability": np.random.beta(5, 2, n),
@@ -1546,7 +1546,7 @@ class TestEnhancedSurvivalAnalysis:
         curves = dashboard_data_loader.load_survival_curves()
         expected = [
             "vip_loyal", "regular_loyal", "bargain_hunter",
-            "new_customer", "dormant", "high_value_at_risk",
+            "explorer", "dormant", "new_customer",
         ]
         for seg in expected:
             assert seg in curves, f"Missing survival curve for {seg}"
@@ -1669,7 +1669,7 @@ class TestCLVViewDetails:
             "clv_predicted": np.random.lognormal(11, 1, n),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
             "risk_level": np.random.choice(
                 ["low", "medium", "high", "critical"], n, p=[0.4, 0.3, 0.2, 0.1],
@@ -1768,7 +1768,7 @@ class TestTreatmentEffectVisualization:
             "treatment_effect": np.random.normal(0.015, 0.04, n),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
         })
 
@@ -2158,7 +2158,7 @@ class TestUpliftModelingViewDetails:
             "treatment_effect": np.random.normal(0.01, 0.04, n),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
         })
 

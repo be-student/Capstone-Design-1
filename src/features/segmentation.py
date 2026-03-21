@@ -11,8 +11,8 @@ Segments:
     3. Potential Loyalist (잠재충성고객) - Recent, growing engagement
     4. At Risk (이탈위험고객) - Declining recency, historically active
     5. Hibernating (휴면고객) - Low recency, low frequency
-    6. New Customer (신규고객) - Recent but limited history
-    7. High Value At Risk (고가치위험군) - High spend, declining recency
+    6. Explorer (탐색형) - Recent but limited history
+    7. New Customer (신규가입자) - High spend, declining recency
     8. Bargain Hunter (가격민감형) - Frequent low-value buyers
 
 Usage:
@@ -97,8 +97,8 @@ DEFAULT_SEGMENTS = [
         "retention_action": "reactivation_offer",
     },
     {
-        "name": "new_customer",
-        "name_kr": "신규고객",
+        "name": "explorer",
+        "name_kr": "탐색형",
         "description": "Recently acquired with limited history",
         "color": "#9b59b6",
         "priority": 6,
@@ -110,9 +110,9 @@ DEFAULT_SEGMENTS = [
         "retention_action": "onboarding_sequence",
     },
     {
-        "name": "high_value_at_risk",
-        "name_kr": "고가치위험군",
-        "description": "High-spend customers with declining recency",
+        "name": "new_customer",
+        "name_kr": "신규가입자",
+        "description": "Newly registered customers",
         "color": "#c0392b",
         "priority": 7,
         "criteria": {
@@ -437,8 +437,8 @@ class CustomerSegmenter:
 
         name_pool = [
             "vip_loyal", "loyal_customer", "potential_loyalist",
-            "at_risk", "hibernating", "new_customer",
-            "high_value_at_risk", "bargain_hunter",
+            "at_risk", "hibernating", "explorer",
+            "new_customer", "bargain_hunter",
         ]
 
         cluster_names = {}

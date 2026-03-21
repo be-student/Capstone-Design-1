@@ -807,7 +807,7 @@ class TestEndToEndDataFlow:
         names = {p["name"] for p in personas}
         expected = {
             "vip_loyal", "regular_loyal", "bargain_hunter",
-            "new_customer", "dormant", "high_value_at_risk",
+            "explorer", "dormant", "new_customer",
         }
         assert names == expected
 

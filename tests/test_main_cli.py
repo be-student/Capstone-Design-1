@@ -106,7 +106,7 @@ def tmp_data_dir(tmp_path):
         "customer_id": range(n),
         "signup_date": pd.date_range("2024-01-01", periods=n, freq="D"),
         "persona": rng.choice(["vip_loyal", "regular_loyal", "bargain_hunter",
-                                "new_customer", "dormant", "high_value_at_risk"], n),
+                                "explorer", "dormant", "new_customer"], n),
         "churn_label": rng.choice([0, 1], n, p=[0.8, 0.2]),
         "treatment_group": rng.choice(["treatment", "control"], n),
     })

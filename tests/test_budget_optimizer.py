@@ -77,7 +77,7 @@ def sample_optimization_data():
     # Add segment labels for channel-level testing
     df["segment"] = np.random.choice(
         ["vip_loyal", "regular_loyal", "bargain_hunter",
-         "new_customer", "dormant", "high_value_at_risk"],
+         "explorer", "dormant", "new_customer"],
         size=n,
     )
 

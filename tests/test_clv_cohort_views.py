@@ -56,7 +56,7 @@ def sample_clv_data():
         "clv_predicted": np.random.lognormal(11, 1, n),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"], n,
+             "explorer", "dormant", "new_customer"], n,
         ),
     })
 
@@ -75,7 +75,7 @@ def sample_predictions():
         ),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"], n,
+             "explorer", "dormant", "new_customer"], n,
         ),
         "clv_predicted": np.random.lognormal(11, 1, n),
     })
@@ -108,7 +108,7 @@ def sample_cohort_events():
     rows = []
     base_date = pd.Timestamp("2024-01-01")
     segments = ["vip_loyal", "regular_loyal", "bargain_hunter",
-                "new_customer", "dormant", "high_value_at_risk"]
+                "explorer", "dormant", "new_customer"]
     for i in range(n_customers):
         first_offset = np.random.randint(0, 180)
         first_date = base_date + pd.Timedelta(days=int(first_offset))
@@ -245,7 +245,7 @@ class TestCLVChurnIntegration:
         assert "churn_probability" in sample_predictions.columns
         assert len(sample_predictions) > 0
 
-    def test_high_value_at_risk_identifiable(self, sample_predictions):
+    def test_new_customer_identifiable(self, sample_predictions):
         """Customers with high CLV + high churn should be identifiable."""
         median_clv = sample_predictions["clv_predicted"].median()
         at_risk = sample_predictions[

@@ -57,7 +57,7 @@ def sample_predictions():
         ),
         "segment": np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"],
+             "explorer", "dormant", "new_customer"],
             n,
         ),
         "recommended_action": np.random.choice(

@@ -333,14 +333,14 @@ personas:
       adverse_effect_prob: 0.03
 
   # =========================================================================
-  # Persona 4: Explorer / New Customer (탐색형/신규가입자)
+  # Persona 4: Explorer (탐색형)
   # =========================================================================
-  # Recently joined or exploration-phase customers still forming habits.
-  # Moderate churn risk; high CS contact rate; responsive to onboarding.
-  - name: "new_customer"
-    name_kr: "신규가입자"
-    description: "Recently joined customers in the onboarding and exploration phase"
-    proportion: 0.20
+  # Exploration-phase customers who browse extensively but purchase infrequently.
+  # High page views, low conversion rate; responsive to personalized curation.
+  - name: "explorer"
+    name_kr: "탐색형"
+    description: "Exploration-phase customers with high browsing but low purchase frequency"
+    proportion: 0.10
     purchase_frequency_monthly: 1.5
     avg_order_value: 55000
     churn_probability: 0.12
@@ -395,13 +395,13 @@ personas:
       adverse_effect_prob: 0.10
 
   # =========================================================================
-  # Persona 6: High-Value At-Risk (고가치위험군)
+  # Persona 6: New Customer (신규가입자)
   # =========================================================================
-  # High spenders whose engagement is visibly declining. Critical segment
-  # for retention — marketing can be effective but must be well-targeted.
-  - name: "high_value_at_risk"
-    name_kr: "고가치위험군"
-    description: "High-spending customers with declining engagement and rising churn risk"
+  # Recently joined customers still forming habits. Moderate churn risk;
+  # responsive to onboarding sequences and welcome offers.
+  - name: "new_customer"
+    name_kr: "신규가입자"
+    description: "Recently joined customers in the onboarding phase with limited purchase history"
     proportion: 0.10
     purchase_frequency_monthly: 3.5
     avg_order_value: 120000
@@ -496,20 +496,20 @@ segmentation:
         monetary_score_min: 1
       retention_action: "reactivation_offer"
 
-    - name: "new_customer"
-      name_kr: "신규고객"
-      description: "Recently acquired customers with limited purchase history"
+    - name: "explorer"
+      name_kr: "탐색형"
+      description: "High browsing but low purchase frequency customers"
       color: "#9b59b6"
       priority: 6
       criteria:
         recency_score_min: 4
         frequency_score_max: 1
         monetary_score_max: 2
-      retention_action: "onboarding_sequence"
+      retention_action: "personalized_curation"
 
-    - name: "high_value_at_risk"
-      name_kr: "고가치위험군"
-      description: "High-spend customers with declining recency - critical for retention"
+    - name: "new_customer"
+      name_kr: "신규가입자"
+      description: "Recently joined customers in onboarding phase"
       color: "#c0392b"
       priority: 7
       criteria:

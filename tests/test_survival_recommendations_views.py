@@ -51,7 +51,7 @@ def sample_survival_data():
     n = 300
     segments = [
         "vip_loyal", "regular_loyal", "bargain_hunter",
-        "new_customer", "dormant", "high_value_at_risk",
+        "explorer", "dormant", "new_customer",
     ]
     return pd.DataFrame({
         "customer_id": [f"C{i:05d}" for i in range(n)],
@@ -74,7 +74,7 @@ def sample_recommendations():
     ]
     segments = [
         "vip_loyal", "regular_loyal", "bargain_hunter",
-        "new_customer", "dormant", "high_value_at_risk",
+        "explorer", "dormant", "new_customer",
     ]
     rec_types = np.random.choice(action_types, n, p=[
         0.2, 0.15, 0.2, 0.15, 0.05, 0.1, 0.15,
@@ -145,7 +145,7 @@ class TestSurvivalAnalysisKMCurves:
         curves = dashboard_data_loader.load_survival_curves()
         expected_segments = [
             "vip_loyal", "regular_loyal", "bargain_hunter",
-            "new_customer", "dormant", "high_value_at_risk",
+            "explorer", "dormant", "new_customer",
         ]
         for seg in expected_segments:
             assert seg in curves, f"Missing curve for segment: {seg}"

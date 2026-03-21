@@ -179,7 +179,7 @@ class DashboardDataLoader:
             ),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
             "recommended_action": np.random.choice(
                 ["coupon", "push_notification", "email", "no_action"], n,
@@ -225,7 +225,7 @@ class DashboardDataLoader:
         total = self.config.get("budget", {}).get("total_krw", 50_000_000)
         segments = [
             "vip_loyal", "regular_loyal", "bargain_hunter",
-            "new_customer", "dormant", "high_value_at_risk",
+            "explorer", "dormant", "new_customer",
         ]
         allocs = [0.10, 0.24, 0.16, 0.20, 0.06, 0.24]
         allocated = [int(total * a) for a in allocs]
@@ -251,7 +251,7 @@ class DashboardDataLoader:
             "event_observed": np.random.binomial(1, 0.3, n),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
             "survival_probability": np.random.beta(5, 2, n),
         })
@@ -274,7 +274,7 @@ class DashboardDataLoader:
         }
         segments = [
             "vip_loyal", "regular_loyal", "bargain_hunter",
-            "new_customer", "dormant", "high_value_at_risk",
+            "explorer", "dormant", "new_customer",
         ]
         rec_types = np.random.choice(action_types, n, p=[
             0.2, 0.15, 0.2, 0.15, 0.05, 0.1, 0.15,
@@ -314,7 +314,7 @@ class DashboardDataLoader:
             "treatment_effect": np.random.normal(0.08, 0.04, n),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
         })
 
@@ -327,7 +327,7 @@ class DashboardDataLoader:
             "clv_predicted": np.random.lognormal(11, 1, n),
             "segment": np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"], n,
+                 "explorer", "dormant", "new_customer"], n,
             ),
         })
 
@@ -389,7 +389,7 @@ class DashboardDataLoader:
             first_date = base_date + pd.Timedelta(days=int(first_offset))
             segment = np.random.choice(
                 ["vip_loyal", "regular_loyal", "bargain_hunter",
-                 "new_customer", "dormant", "high_value_at_risk"]
+                 "explorer", "dormant", "new_customer"]
             )
             for j in range(np.random.randint(1, events_per_customer + 1)):
                 event_offset = np.random.randint(0, 365)
@@ -644,9 +644,9 @@ class DashboardDataLoader:
             "vip_loyal": 0.92,
             "regular_loyal": 0.80,
             "bargain_hunter": 0.65,
-            "new_customer": 0.70,
+            "explorer": 0.70,
             "dormant": 0.40,
-            "high_value_at_risk": 0.55,
+            "new_customer": 0.55,
         }
         for seg, base_survival in segments.items():
             timeline = list(range(0, 361, 10))
@@ -810,7 +810,7 @@ class DashboardDataLoader:
         n = 50
         segments = np.random.choice(
             ["vip_loyal", "regular_loyal", "bargain_hunter",
-             "new_customer", "dormant", "high_value_at_risk"], n,
+             "explorer", "dormant", "new_customer"], n,
         )
         probs = np.random.beta(3, 3, n)
         risk_levels = []
@@ -829,7 +829,7 @@ class DashboardDataLoader:
         costs = []
         for seg, risk in zip(segments, risk_levels):
             if risk in ("critical", "high"):
-                if seg in ("vip_loyal", "high_value_at_risk"):
+                if seg in ("vip_loyal", "new_customer"):
                     offer_types.append("premium_discount")
                     offer_details.append("30% off next 3 orders + free shipping")
                     costs.append(int(np.random.uniform(50000, 150000)))

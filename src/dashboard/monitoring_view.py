@@ -380,9 +380,9 @@ def _render_survival_section(
             "vip_loyal": "#2ecc71",
             "regular_loyal": "#3498db",
             "bargain_hunter": "#e67e22",
-            "new_customer": "#9b59b6",
+            "explorer": "#9b59b6",
             "dormant": "#e74c3c",
-            "high_value_at_risk": "#f39c12",
+            "new_customer": "#f39c12",
         }
 
         fig_surv = go.Figure()
