@@ -1,0 +1,12 @@
+# OMC (oh-my-claudecode)
+.omc/
+
+# Ouroboros
+.ouroboros.yaml
+.ouroboros/
+
+# Claude Code
+.claude/
+
+# require.md
+require.md
