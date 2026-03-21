@@ -17,9 +17,9 @@ simulation:
   start_date: "2024-01-01"
   time_resolution: "daily"
   small_mode:
-    num_customers: 1000
-    simulation_months: 6
-    simulation_days: 180
+    num_customers: 500
+    simulation_months: 3
+    simulation_days: 90
 
 # ---------------------------------------------------------------------------
 # Churn definition (configurable thresholds)

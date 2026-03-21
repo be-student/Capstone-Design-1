@@ -524,7 +524,8 @@ def run_survival(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
     model = SurvivalModel(config)
     model.fit(X[surv_feats], duration, event)
 
-    median_surv = model.predict_median_survival(X[surv_feats])
+    # Predict survival probabilities at a reference time (e.g., 90 days)
+    surv_probs = model.predict_survival(X[surv_feats], t=90.0)
 
     out: Dict[str, Any] = {
         "mode": "survival",
@@ -532,8 +533,8 @@ def run_survival(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
         "num_customers": len(X),
         "num_events": int(event.sum()),
     }
-    if median_surv is not None:
-        out["median_survival_overall"] = float(np.nanmedian(median_surv))
+    if surv_probs is not None:
+        out["median_survival_prob_90d"] = float(np.nanmedian(surv_probs))
     if model.cox_model is not None:
         out["concordance_index"] = float(model.cox_model.concordance_index_)
 
