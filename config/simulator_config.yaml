@@ -17,7 +17,7 @@ simulation:
   start_date: "2024-01-01"
   time_resolution: "daily"
   small_mode:
-    num_customers: 5000
+    num_customers: 1000
     simulation_months: 6
     simulation_days: 180
 

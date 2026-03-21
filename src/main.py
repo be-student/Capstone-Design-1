@@ -165,8 +165,9 @@ def _compute_features(config: Dict, customers: pd.DataFrame,
 def _feature_cols(df: pd.DataFrame) -> List[str]:
     """Return numeric feature column names (drop meta columns)."""
     exclude = {"customer_id", "churn_label", "reference_date",
-                "treatment_group", "signup_date"}
-    return [c for c in df.columns if c not in exclude]
+                "treatment_group", "signup_date", "persona"}
+    numeric = df.select_dtypes(include=[np.number]).columns.tolist()
+    return [c for c in numeric if c not in exclude]
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +226,7 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
         test_months=pipe.get("test_months", 2),
     )
 
-    fcols = [c for c in X_train.columns if c != "reference_date"]
+    fcols = _feature_cols(X_train)
     X_tr, X_te = X_train[fcols], X_test[fcols]
 
     results: Dict[str, Any] = {"mode": "train"}

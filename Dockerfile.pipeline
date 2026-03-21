@@ -3,14 +3,31 @@
 # =============================================================================
 # Runs the churn prediction training pipeline with all ML/DL dependencies.
 # CPU-only build — GPU support can be added by changing the base image.
+#
+# Supported modes (via PIPELINE_MODE env var or --mode flag):
+#   simulate, train, uplift, clv, optimize, ab_test, survival,
+#   recommend, cohort, segment, monitor, features, dashboard, all
+#
+# Build:
+#   docker build -f Dockerfile.pipeline -t churn-pipeline .
+#
+# Run examples:
+#   docker run churn-pipeline                                  # full pipeline
+#   docker run -e PIPELINE_MODE=train churn-pipeline           # train only
+#   docker run -e PIPELINE_MODE=uplift -e SMALL=true churn-pipeline
 # =============================================================================
 
 FROM python:3.10-slim
 
 LABEL maintainer="churn-prediction-team"
 LABEL description="ML/DL churn prediction training pipeline"
+LABEL version="1.0"
 
 # Install system dependencies
+# - curl: health checks and API calls
+# - build-essential: compiling native extensions (XGBoost, LightGBM)
+# - libgomp1: OpenMP runtime for parallel tree-based models
+# - git: for pip packages that may need git
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -31,12 +48,29 @@ COPY src/ /app/src/
 COPY config/ /app/config/
 COPY scripts/ /app/scripts/
 
+# Make scripts executable
+RUN chmod +x /app/scripts/*.sh 2>/dev/null || true
+
 # Create output directories for pipeline artifacts
-RUN mkdir -p /app/output /app/data /app/results /app/models /app/mlflow
+RUN mkdir -p /app/output /app/data/raw /app/data/processed \
+             /app/results /app/models /app/mlflow
 
 # Set Python path so src modules are importable
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Default command: run the full pipeline
-CMD ["python", "-m", "src.main", "--mode", "all"]
+# Pipeline configuration via environment variables
+# PIPELINE_MODE: which pipeline mode to run (default: all)
+# SMALL: set to "true" for reduced dataset size (faster testing)
+# BUDGET: budget cap for optimization mode (default: uses config)
+# VERBOSE: set to "true" for verbose logging
+ENV PIPELINE_MODE=all
+ENV SMALL=false
+ENV BUDGET=""
+ENV VERBOSE=false
+
+# Use the pipeline entrypoint script for flexible mode/flag handling
+COPY scripts/pipeline_entrypoint.sh /app/scripts/pipeline_entrypoint.sh
+RUN chmod +x /app/scripts/pipeline_entrypoint.sh
+
+ENTRYPOINT ["/app/scripts/pipeline_entrypoint.sh"]

@@ -7,6 +7,20 @@
 #   - dashboard:  Streamlit dashboard (localhost:8501)
 #   - redis:      Redis for real-time scoring and caching
 #   - mlflow:     MLflow tracking server (localhost:5000)
+#
+# Quick Start:
+#   docker compose up                          # Run everything
+#   docker compose up dashboard                # Dashboard + dependencies
+#   docker compose up pipeline                 # Pipeline + dependencies
+#
+# Pipeline modes (via PIPELINE_MODE env var):
+#   simulate, train, uplift, clv, optimize, ab_test, survival,
+#   recommend, cohort, segment, monitor, features, dashboard, all
+#
+# Examples:
+#   PIPELINE_MODE=train docker compose up pipeline
+#   SMALL=true docker compose up
+#   SKIP_PIPELINE=true docker compose up dashboard
 # =============================================================================
 
 version: "3.8"
@@ -24,7 +38,7 @@ services:
       dockerfile: Dockerfile.mlflow
     container_name: churn-mlflow
     ports:
-      - "5001:5000"
+      - "${MLFLOW_PORT:-5001}:5000"
     volumes:
       - mlflow-data:/mlflow
     environment:
@@ -49,7 +63,7 @@ services:
     image: redis:7-alpine
     container_name: churn-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
@@ -64,6 +78,16 @@ services:
 
   # ---------------------------------------------------------------------------
   # ML/DL Pipeline
+  # ---------------------------------------------------------------------------
+  # Runs the churn prediction pipeline. Supports all modes:
+  #   simulate, train, uplift, clv, optimize, ab_test, survival,
+  #   recommend, cohort, segment, monitor, features, all
+  #
+  # Configuration via environment variables:
+  #   PIPELINE_MODE - which mode to run (default: all)
+  #   SMALL         - "true" for reduced dataset (default: false)
+  #   BUDGET        - budget cap for optimize mode
+  #   VERBOSE       - "true" for verbose logging
   # ---------------------------------------------------------------------------
   pipeline:
     build:
@@ -83,6 +107,10 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - PYTHONPATH=/app
+      - PIPELINE_MODE=${PIPELINE_MODE:-all}
+      - SMALL=${SMALL:-true}
+      - BUDGET=${BUDGET:-}
+      - VERBOSE=${VERBOSE:-false}
     depends_on:
       mlflow:
         condition: service_healthy
@@ -95,11 +123,17 @@ services:
   # Streamlit Dashboard
   # ---------------------------------------------------------------------------
   # The dashboard waits for the pipeline container to finish before launching.
-  # It uses the orchestration entrypoint (scripts/entrypoint.sh) which:
-  #   1. Runs the full ML pipeline (data generation, training, evaluation)
-  #   2. Verifies pipeline outputs exist
-  #   3. Launches Streamlit dashboard
-  # Set SKIP_PIPELINE=true if pipeline already ran or data is pre-generated.
+  # Set SKIP_PIPELINE=true to skip waiting for pipeline completion.
+  #
+  # Views available:
+  #   - Churn prediction overview
+  #   - Uplift modeling / 4-quadrant segmentation
+  #   - CLV analysis
+  #   - A/B test results
+  #   - Survival curves
+  #   - Cohort retention
+  #   - Budget optimization
+  #   - Recommendations
   # ---------------------------------------------------------------------------
   dashboard:
     build:
@@ -107,7 +141,7 @@ services:
       dockerfile: Dockerfile.dashboard
     container_name: churn-dashboard
     ports:
-      - "8501:8501"
+      - "${DASHBOARD_PORT:-8501}:8501"
     volumes:
       - ./config:/app/config
       - ./data:/app/data

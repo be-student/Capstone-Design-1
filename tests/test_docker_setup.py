@@ -187,9 +187,9 @@ class TestDockerfilePipeline:
         """Must set WORKDIR."""
         assert "WORKDIR" in dockerfile_pipeline
 
-    def test_has_cmd(self, dockerfile_pipeline):
-        """Must have a default CMD."""
-        assert "CMD" in dockerfile_pipeline
+    def test_has_cmd_or_entrypoint(self, dockerfile_pipeline):
+        """Must have a default CMD or ENTRYPOINT."""
+        assert "CMD" in dockerfile_pipeline or "ENTRYPOINT" in dockerfile_pipeline
 
     def test_has_label(self, dockerfile_pipeline):
         """Must have LABEL metadata."""
@@ -761,13 +761,13 @@ class TestPortConfiguration:
         """Redis must serve on port 6379."""
         redis = docker_compose["services"]["redis"]
         ports = [str(p) for p in redis.get("ports", [])]
-        assert any("6379:6379" in p for p in ports)
+        assert any("6379" in p for p in ports)
 
     def test_dashboard_on_8501(self, docker_compose):
         """Dashboard must serve on port 8501."""
         dashboard = docker_compose["services"]["dashboard"]
         ports = [str(p) for p in dashboard.get("ports", [])]
-        assert any("8501:8501" in p for p in ports)
+        assert any("8501" in p for p in ports)
 
 
 # ---------------------------------------------------------------------------
@@ -883,3 +883,137 @@ class TestCrossFileConsistency:
         assert len(undefined) == 0, (
             f"Undefined volumes used: {undefined}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline entrypoint script tests
+# ---------------------------------------------------------------------------
+
+class TestPipelineEntrypoint:
+    """Test pipeline entrypoint script validity."""
+
+    @pytest.fixture
+    def pipeline_entrypoint(self):
+        path = PROJECT_ROOT / "scripts" / "pipeline_entrypoint.sh"
+        return path.read_text()
+
+    def test_entrypoint_exists(self, project_root):
+        """Pipeline entrypoint script must exist."""
+        assert (project_root / "scripts" / "pipeline_entrypoint.sh").exists()
+
+    def test_entrypoint_has_shebang(self, pipeline_entrypoint):
+        """Entrypoint must start with shebang line."""
+        assert pipeline_entrypoint.startswith("#!/")
+
+    def test_entrypoint_uses_strict_mode(self, pipeline_entrypoint):
+        """Entrypoint must use strict error handling."""
+        assert "set -e" in pipeline_entrypoint
+
+    def test_entrypoint_reads_pipeline_mode(self, pipeline_entrypoint):
+        """Entrypoint must read PIPELINE_MODE env var."""
+        assert "PIPELINE_MODE" in pipeline_entrypoint
+
+    def test_entrypoint_supports_small_flag(self, pipeline_entrypoint):
+        """Entrypoint must support --small flag via SMALL env var."""
+        assert "SMALL" in pipeline_entrypoint
+        assert "--small" in pipeline_entrypoint
+
+    def test_entrypoint_calls_src_main(self, pipeline_entrypoint):
+        """Entrypoint must invoke src.main Python module."""
+        assert "src.main" in pipeline_entrypoint
+
+    def test_entrypoint_supports_cli_passthrough(self, pipeline_entrypoint):
+        """Entrypoint must support passing CLI args directly."""
+        assert '"$@"' in pipeline_entrypoint
+
+    def test_entrypoint_uses_exec(self, pipeline_entrypoint):
+        """Entrypoint must use exec for proper signal handling."""
+        assert "exec python" in pipeline_entrypoint
+
+    def test_entrypoint_supports_budget(self, pipeline_entrypoint):
+        """Entrypoint must support BUDGET env var."""
+        assert "BUDGET" in pipeline_entrypoint
+
+    def test_entrypoint_supports_verbose(self, pipeline_entrypoint):
+        """Entrypoint must support VERBOSE env var."""
+        assert "VERBOSE" in pipeline_entrypoint
+
+    def test_entrypoint_is_executable(self, project_root):
+        """Entrypoint script must have execute permission."""
+        path = project_root / "scripts" / "pipeline_entrypoint.sh"
+        assert os.access(str(path), os.X_OK), (
+            "pipeline_entrypoint.sh must be executable"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline configurable env vars in Dockerfile
+# ---------------------------------------------------------------------------
+
+class TestPipelineDockerfileEnvVars:
+    """Test that Dockerfile.pipeline exposes configurable env vars."""
+
+    def test_pipeline_mode_env(self, dockerfile_pipeline):
+        """PIPELINE_MODE must be defined in Dockerfile."""
+        assert "PIPELINE_MODE" in dockerfile_pipeline
+
+    def test_small_env(self, dockerfile_pipeline):
+        """SMALL must be defined in Dockerfile."""
+        assert "SMALL" in dockerfile_pipeline
+
+    def test_budget_env(self, dockerfile_pipeline):
+        """BUDGET must be defined in Dockerfile."""
+        assert "BUDGET" in dockerfile_pipeline
+
+    def test_verbose_env(self, dockerfile_pipeline):
+        """VERBOSE must be defined in Dockerfile."""
+        assert "VERBOSE" in dockerfile_pipeline
+
+    def test_has_entrypoint(self, dockerfile_pipeline):
+        """Must use ENTRYPOINT for flexible CLI handling."""
+        assert "ENTRYPOINT" in dockerfile_pipeline
+
+    def test_entrypoint_references_script(self, dockerfile_pipeline):
+        """ENTRYPOINT must reference pipeline_entrypoint.sh."""
+        assert "pipeline_entrypoint.sh" in dockerfile_pipeline
+
+    def test_copies_entrypoint_script(self, dockerfile_pipeline):
+        """Must COPY the pipeline entrypoint script."""
+        assert "pipeline_entrypoint.sh" in dockerfile_pipeline
+
+    def test_makes_scripts_executable(self, dockerfile_pipeline):
+        """Must chmod +x the entrypoint script."""
+        assert "chmod +x" in dockerfile_pipeline
+
+
+# ---------------------------------------------------------------------------
+# docker-compose pipeline env var passthrough
+# ---------------------------------------------------------------------------
+
+class TestComposeEnvVarPassthrough:
+    """Test that docker-compose passes env vars to pipeline container."""
+
+    def test_pipeline_mode_passthrough(self, docker_compose):
+        """PIPELINE_MODE must be passed to pipeline container."""
+        env = docker_compose["services"]["pipeline"].get("environment", [])
+        env_str = str(env)
+        assert "PIPELINE_MODE" in env_str
+
+    def test_small_passthrough(self, docker_compose):
+        """SMALL must be passed to pipeline container."""
+        env = docker_compose["services"]["pipeline"].get("environment", [])
+        env_str = str(env)
+        assert "SMALL" in env_str
+
+    def test_dashboard_skip_pipeline(self, docker_compose):
+        """Dashboard must support SKIP_PIPELINE env var."""
+        env = docker_compose["services"]["dashboard"].get("environment", [])
+        env_str = str(env)
+        assert "SKIP_PIPELINE" in env_str
+
+    def test_dashboard_waits_for_pipeline(self, docker_compose):
+        """Dashboard must wait for pipeline to complete successfully."""
+        dashboard = docker_compose["services"]["dashboard"]
+        depends = dashboard.get("depends_on", {})
+        pipeline_dep = depends.get("pipeline", {})
+        assert pipeline_dep.get("condition") == "service_completed_successfully"

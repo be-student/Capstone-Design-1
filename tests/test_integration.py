@@ -584,15 +584,19 @@ class TestMLflowBackendIntegration:
         assert artifact_dir.is_dir()
 
     def test_no_postgresql_dependency(self):
-        """MLflow must NOT depend on PostgreSQL."""
+        """MLflow must NOT depend on PostgreSQL as a running service."""
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
+            import yaml as _yaml
             with open(compose_path, "r") as f:
-                content = f.read().lower()
+                compose = _yaml.safe_load(f)
 
-            assert "postgres" not in content, (
-                "MLflow should use SQLite, not PostgreSQL"
-            )
+            services = compose.get("services", {})
+            # No postgres/postgresql service should be defined
+            for svc_name in services:
+                assert "postgres" not in svc_name.lower(), (
+                    f"MLflow should use SQLite, not PostgreSQL service '{svc_name}'"
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -1,54 +1,48 @@
 # Deployment Guide
 
-> **Customer Churn Prediction & Retention Optimization System — Configuration and Deployment Reference**
+> **Customer Churn Prediction & Retention Optimization System — Deployment, CLI, and Dashboard Reference**
 
-This document covers Docker Compose configuration, environment variables, service
-dependencies, scaling considerations, monitoring setup, and operational procedures
-for the e-commerce churn prediction system.
+This document covers Docker setup instructions, CLI usage guide, Streamlit dashboard
+configuration, and production deployment guidelines for the e-commerce churn
+prediction and retention optimization system.
 
 ---
 
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Docker Compose Architecture](#2-docker-compose-architecture)
-   - 2.1 [Service Overview](#21-service-overview)
-   - 2.2 [Network Topology](#22-network-topology)
-   - 2.3 [Volume Mounts](#23-volume-mounts)
-3. [Docker Compose Configuration](#3-docker-compose-configuration)
-   - 3.1 [docker-compose.yml Reference](#31-docker-composeyml-reference)
-   - 3.2 [Dockerfile.pipeline](#32-dockerfilepipeline)
-   - 3.3 [Dockerfile.dashboard](#33-dockerfiledashboard)
-4. [Environment Variables](#4-environment-variables)
-   - 4.1 [Global Variables](#41-global-variables)
-   - 4.2 [Pipeline Container](#42-pipeline-container)
-   - 4.3 [Dashboard Container](#43-dashboard-container)
-   - 4.4 [Redis Container](#44-redis-container)
-   - 4.5 [MLflow Container](#45-mlflow-container)
-5. [Service Dependencies](#5-service-dependencies)
-   - 5.1 [Startup Order](#51-startup-order)
-   - 5.2 [Health Checks](#52-health-checks)
-   - 5.3 [Dependency Graph](#53-dependency-graph)
-6. [Deployment Procedures](#6-deployment-procedures)
-   - 6.1 [First-Time Deployment](#61-first-time-deployment)
-   - 6.2 [Pipeline Execution Modes](#62-pipeline-execution-modes)
-   - 6.3 [Restarting After Failure](#63-restarting-after-failure)
-   - 6.4 [Updating Configuration](#64-updating-configuration)
-7. [Scaling Considerations](#7-scaling-considerations)
-   - 7.1 [Horizontal Scaling](#71-horizontal-scaling)
-   - 7.2 [Vertical Scaling (Resource Limits)](#72-vertical-scaling-resource-limits)
-   - 7.3 [Data Volume Scaling](#73-data-volume-scaling)
-   - 7.4 [Redis Scaling](#74-redis-scaling)
-   - 7.5 [Production Migration Path](#75-production-migration-path)
-8. [Monitoring Setup](#8-monitoring-setup)
-   - 8.1 [Pipeline State Monitoring](#81-pipeline-state-monitoring)
-   - 8.2 [Container Health Monitoring](#82-container-health-monitoring)
-   - 8.3 [Model Performance Monitoring](#83-model-performance-monitoring)
-   - 8.4 [Data Drift Detection](#84-data-drift-detection)
-   - 8.5 [Log Aggregation](#85-log-aggregation)
-   - 8.6 [Alert Configuration](#86-alert-configuration)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Security Considerations](#10-security-considerations)
+2. [Docker Setup Instructions](#2-docker-setup-instructions)
+   - 2.1 [Service Architecture](#21-service-architecture)
+   - 2.2 [Quick Start](#22-quick-start)
+   - 2.3 [Docker Compose Configuration](#23-docker-compose-configuration)
+   - 2.4 [Dockerfiles](#24-dockerfiles)
+   - 2.5 [Environment Variables](#25-environment-variables)
+   - 2.6 [Volumes & Networking](#26-volumes--networking)
+   - 2.7 [Service Dependencies & Health Checks](#27-service-dependencies--health-checks)
+3. [CLI Usage Guide](#3-cli-usage-guide)
+   - 3.1 [Overview](#31-overview)
+   - 3.2 [Command Syntax](#32-command-syntax)
+   - 3.3 [Available Modes](#33-available-modes)
+   - 3.4 [Flags & Options](#34-flags--options)
+   - 3.5 [Usage Examples](#35-usage-examples)
+   - 3.6 [Running via Docker](#36-running-via-docker)
+   - 3.7 [Running via Python Module](#37-running-via-python-module)
+   - 3.8 [Full Pipeline (`--mode all`)](#38-full-pipeline---mode-all)
+4. [Streamlit Dashboard Configuration](#4-streamlit-dashboard-configuration)
+   - 4.1 [Dashboard Views](#41-dashboard-views)
+   - 4.2 [Launching the Dashboard](#42-launching-the-dashboard)
+   - 4.3 [Configuration Options](#43-configuration-options)
+   - 4.4 [Data Sources](#44-data-sources)
+   - 4.5 [Dashboard Customization](#45-dashboard-customization)
+5. [Production Deployment Guidelines](#5-production-deployment-guidelines)
+   - 5.1 [Production Migration Path](#51-production-migration-path)
+   - 5.2 [Scaling Considerations](#52-scaling-considerations)
+   - 5.3 [Resource Limits](#53-resource-limits)
+   - 5.4 [Security Hardening](#54-security-hardening)
+   - 5.5 [Monitoring & Observability](#55-monitoring--observability)
+   - 5.6 [Backup & Recovery](#56-backup--recovery)
+6. [Troubleshooting](#6-troubleshooting)
+7. [Quick Reference](#7-quick-reference)
 
 ---
 
@@ -58,553 +52,682 @@ for the e-commerce churn prediction system.
 |------------|----------------|-------|
 | **Docker** | 20.10+ | `docker --version` to verify |
 | **Docker Compose** | 2.0+ (V2) | `docker compose version` to verify |
+| **Python** | 3.10+ | For local (non-Docker) development |
 | **Disk Space** | 10 GB free | For images, data, models, and MLflow artifacts |
 | **RAM** | 8 GB recommended | Pipeline container is memory-intensive during training |
 | **CPU** | 4 cores recommended | All models run on CPU only (no GPU required) |
 | **OS** | Linux, macOS, Windows (WSL2) | Docker Desktop on macOS/Windows |
 
-Verify your Docker installation:
+Verify your installation:
 
 ```bash
 docker --version          # Docker >= 20.10
 docker compose version    # Compose >= 2.0
 docker info               # Confirm daemon is running
+python --version          # Python >= 3.10 (for local dev)
 ```
 
 ---
 
-## 2. Docker Compose Architecture
+## 2. Docker Setup Instructions
 
-### 2.1 Service Overview
+### 2.1 Service Architecture
 
 The system comprises **4 containers** orchestrated by Docker Compose:
 
-| Service | Image Base | Exposed Port | Purpose |
+| Service | Image Base | Default Port | Purpose |
 |---------|-----------|-------------|---------|
-| `pipeline` | `python:3.10-slim` | 8000 (API) | ML/DL training, data simulation, optimization, real-time scoring API |
+| `mlflow` | `python:3.10-slim` | 5001 (host) → 5000 (container) | MLflow experiment tracking (SQLite backend) |
+| `redis` | `redis:7-alpine` | 6379 | Real-time feature store, caching |
+| `pipeline` | `python:3.10-slim` | — | ML/DL training, data simulation, optimization |
 | `dashboard` | `python:3.10-slim` | 8501 | Streamlit interactive dashboard |
-| `redis` | `redis:7-alpine` | 6379 | Real-time feature store, event streaming, score caching |
-| `mlflow` | `python:3.10-slim` | 5000 | Experiment tracking server (SQLite backend) |
-
-### 2.2 Network Topology
 
 ```
-                    Host Machine
-                    ============
-                         |
-          +--------------+--------------+
-          |              |              |
-     localhost:8501 localhost:5000 localhost:8000
-          |              |              |
-  ┌───────┴──────┐ ┌────┴─────┐ ┌──────┴──────┐
-  │  dashboard   │ │  mlflow  │ │   pipeline  │
-  │  (Streamlit) │ │ (Tracking│ │  (ML/DL +   │
-  │              │ │  Server) │ │   API)      │
-  └──────┬───────┘ └────┬─────┘ └──────┬──────┘
-         |              |              |
-         +--------------+--------------+
-                        |
-              Docker Internal Network
-              (churn_prediction_net)
-                        |
-                 ┌──────┴──────┐
-                 │    redis    │
-                 │  (port 6379)│
-                 └─────────────┘
+                Host Machine
+                ============
+                     |
+      +--------------+--------------+
+      |              |              |
+ localhost:8501 localhost:5001 localhost:6379
+      |              |              |
+┌─────┴──────┐ ┌────┴─────┐ ┌──────┴──────┐
+│  dashboard │ │  mlflow  │ │    redis    │
+│ (Streamlit)│ │(Tracking)│ │  (Cache)    │
+└─────┬──────┘ └────┬─────┘ └──────┬──────┘
+      |              |              |
+      +--------------+--------------+
+                     |
+           Docker Bridge Network
+            (churn-network)
+                     |
+              ┌──────┴──────┐
+              │   pipeline  │
+              │  (ML/DL)    │
+              └─────────────┘
 ```
 
-All containers communicate over the Docker bridge network `churn_prediction_net`.
-Services reference each other by container name (e.g., `redis:6379`, `mlflow:5000`).
-
-### 2.3 Volume Mounts
-
-Shared volumes ensure data persistence across container restarts:
-
-| Host Path | Container Path | Used By | Purpose |
-|-----------|---------------|---------|---------|
-| `./config/` | `/app/config/` | pipeline, dashboard | YAML configuration files |
-| `./data/` | `/app/data/` | pipeline, dashboard | Raw data and feature store |
-| `./models/` | `/app/models/` | pipeline, dashboard | Trained model artifacts |
-| `./results/` | `/app/results/` | pipeline, dashboard | Output CSVs, plots, reports |
-| `./mlruns/` | `/app/mlruns/` | pipeline, mlflow | MLflow experiment tracking data |
-| `./pipeline_state.json` | `/app/pipeline_state.json` | pipeline, dashboard | Pipeline checkpoint state |
-
-> **Important:** All volume mounts are bind mounts (not Docker volumes), so data
-> is directly accessible on the host filesystem for inspection and debugging.
-
----
-
-## 3. Docker Compose Configuration
-
-### 3.1 docker-compose.yml Reference
-
-```yaml
-version: "3.8"
-
-services:
-  # ─────────────────────────────────────────────────
-  # Redis — Real-time feature store & event streaming
-  # ─────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    container_name: churn-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-    restart: unless-stopped
-    networks:
-      - churn_prediction_net
-
-  # ─────────────────────────────────────────────────
-  # MLflow — Experiment tracking server
-  # ─────────────────────────────────────────────────
-  mlflow:
-    build:
-      context: .
-      dockerfile: Dockerfile.mlflow
-    container_name: churn-mlflow
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./mlruns:/app/mlruns
-    environment:
-      - MLFLOW_BACKEND_STORE_URI=sqlite:///app/mlruns/mlflow.db
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/app/mlruns/artifacts
-    command: >
-      mlflow server
-        --backend-store-uri sqlite:///app/mlruns/mlflow.db
-        --default-artifact-root /app/mlruns/artifacts
-        --host 0.0.0.0
-        --port 5000
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    restart: unless-stopped
-    networks:
-      - churn_prediction_net
-
-  # ─────────────────────────────────────────────────
-  # Pipeline — ML/DL training & real-time scoring API
-  # ─────────────────────────────────────────────────
-  pipeline:
-    build:
-      context: .
-      dockerfile: Dockerfile.pipeline
-    container_name: churn-pipeline
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./results:/app/results
-      - ./mlruns:/app/mlruns
-      - ./pipeline_state.json:/app/pipeline_state.json
-    environment:
-      - PYTHONPATH=/app
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - PIPELINE_MODE=${PIPELINE_MODE:-train}
-      - RANDOM_SEED=${RANDOM_SEED:-42}
-      - NUM_CUSTOMERS=${NUM_CUSTOMERS:-20000}
-      - BUDGET_KRW=${BUDGET_KRW:-50000000}
-    depends_on:
-      redis:
-        condition: service_healthy
-      mlflow:
-        condition: service_healthy
-    restart: on-failure:3
-    networks:
-      - churn_prediction_net
-
-  # ─────────────────────────────────────────────────
-  # Dashboard — Streamlit interactive UI
-  # ─────────────────────────────────────────────────
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
-    container_name: churn-dashboard
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./results:/app/results
-      - ./pipeline_state.json:/app/pipeline_state.json
-    environment:
-      - PYTHONPATH=/app
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - API_BASE_URL=http://pipeline:8000
-    depends_on:
-      redis:
-        condition: service_healthy
-      pipeline:
-        condition: service_started
-    restart: unless-stopped
-    networks:
-      - churn_prediction_net
-
-networks:
-  churn_prediction_net:
-    driver: bridge
-
-volumes:
-  redis_data:
-```
-
-### 3.2 Dockerfile.pipeline
-
-```dockerfile
-FROM python:3.10-slim
-
-WORKDIR /app
-
-# System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Application code
-COPY src/ /app/src/
-COPY config/ /app/config/
-
-# Default command: run the full pipeline
-CMD ["python", "src/main.py", "--mode", "train"]
-```
-
-### 3.3 Dockerfile.dashboard
-
-```dockerfile
-FROM python:3.10-slim
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY dashboard/ /app/dashboard/
-COPY src/ /app/src/
-COPY config/ /app/config/
-
-EXPOSE 8501
-
-CMD ["streamlit", "run", "dashboard/app.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true"]
-```
-
----
-
-## 4. Environment Variables
-
-### 4.1 Global Variables
-
-These variables apply across all containers:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PYTHONPATH` | `/app` | Python module search path |
-| `TZ` | `Asia/Seoul` | Timezone for log timestamps |
-
-### 4.2 Pipeline Container
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PIPELINE_MODE` | `train` | Execution mode: `train`, `uplift`, `optimize`, `all` |
-| `RANDOM_SEED` | `42` | Random seed for reproducibility |
-| `NUM_CUSTOMERS` | `20000` | Number of customers to simulate |
-| `BUDGET_KRW` | `50000000` | Retention budget in KRW |
-| `REDIS_HOST` | `redis` | Redis server hostname |
-| `REDIS_PORT` | `6379` | Redis server port |
-| `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow tracking server URL |
-| `API_HOST` | `0.0.0.0` | API server bind address |
-| `API_PORT` | `8000` | API server bind port |
-| `API_KEY` | `churn-api-dev-key-2024` | API authentication key |
-| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `SMALL_MODE` | `false` | Use small dataset (5K customers, 6 months) for testing |
-
-### 4.3 Dashboard Container
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_BASE_URL` | `http://pipeline:8000` | Pipeline API base URL for internal calls |
-| `REDIS_HOST` | `redis` | Redis hostname for real-time data |
-| `REDIS_PORT` | `6379` | Redis port |
-| `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow server for experiment browsing |
-| `STREAMLIT_SERVER_PORT` | `8501` | Streamlit port |
-| `STREAMLIT_SERVER_HEADLESS` | `true` | Run Streamlit without browser auto-open |
-
-### 4.4 Redis Container
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REDIS_MAXMEMORY` | `512mb` | Maximum memory allocation |
-| `REDIS_MAXMEMORY_POLICY` | `allkeys-lru` | Eviction policy when memory limit is reached |
-| `REDIS_APPENDONLY` | `yes` | Enable AOF persistence |
-
-Redis is configured via command-line flags in `docker-compose.yml`. For advanced
-configuration, mount a custom `redis.conf`:
-
-```yaml
-redis:
-  volumes:
-    - ./config/redis.conf:/usr/local/etc/redis/redis.conf
-  command: redis-server /usr/local/etc/redis/redis.conf
-```
-
-### 4.5 MLflow Container
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MLFLOW_BACKEND_STORE_URI` | `sqlite:///app/mlruns/mlflow.db` | Backend store (SQLite) |
-| `MLFLOW_DEFAULT_ARTIFACT_ROOT` | `/app/mlruns/artifacts` | Artifact storage path |
-| `MLFLOW_HOST` | `0.0.0.0` | Server bind address |
-| `MLFLOW_PORT` | `5000` | Server bind port |
-
-> **Note:** This deployment uses local SQLite for the backend store and a local
-> filesystem for artifacts. No PostgreSQL or S3 is required.
-
-### Override via .env File
-
-Create a `.env` file in the project root to override defaults without modifying
-`docker-compose.yml`:
-
-```bash
-# .env
-PIPELINE_MODE=all
-RANDOM_SEED=42
-NUM_CUSTOMERS=20000
-BUDGET_KRW=50000000
-SMALL_MODE=false
-LOG_LEVEL=INFO
-API_KEY=my-production-api-key
-```
-
-Docker Compose automatically loads this file. You can also specify a custom env file:
-
-```bash
-docker compose --env-file .env.production up --build
-```
-
----
-
-## 5. Service Dependencies
-
-### 5.1 Startup Order
-
-Services start in a strict dependency order to ensure infrastructure is ready
-before application containers launch:
-
-```
-1. redis        (no dependencies — starts first)
-2. mlflow       (no dependencies — starts in parallel with redis)
-3. pipeline     (depends_on: redis [healthy], mlflow [healthy])
-4. dashboard    (depends_on: redis [healthy], pipeline [started])
-```
-
-The `depends_on` conditions ensure:
-- **Redis** is accepting connections (health check passes) before the pipeline starts
-- **MLflow** is serving HTTP requests before the pipeline begins experiment logging
-- **Pipeline** has started (but not necessarily completed training) before the dashboard launches
-
-### 5.2 Health Checks
-
-Each service defines health checks to validate readiness:
-
-| Service | Health Check | Interval | Timeout | Retries | Start Period |
-|---------|-------------|----------|---------|---------|-------------|
-| `redis` | `redis-cli ping` | 10s | 5s | 5 | 5s |
-| `mlflow` | `curl -f http://localhost:5000/health` | 30s | 10s | 3 | 15s |
-| `pipeline` | `curl -f http://localhost:8000/api/v1/health` | 30s | 10s | 5 | 60s |
-| `dashboard` | `curl -f http://localhost:8501/_stcore/health` | 30s | 10s | 3 | 30s |
-
-### 5.3 Dependency Graph
-
-```
-               ┌──────────┐
-               │  redis   │  (infrastructure)
-               └────┬─────┘
-                    │ healthy
-        ┌───────────┼───────────┐
-        │           │           │
-        ▼           ▼           │
-  ┌──────────┐ ┌──────────┐    │
-  │  mlflow  │ │          │    │
-  └────┬─────┘ │          │    │
-       │healthy│          │    │
-       ▼       │          │    │
-  ┌──────────┐ │          │    │
-  │ pipeline ├─┘          │    │
-  └────┬─────┘            │    │
-       │ started          │    │
-       ▼                  │    │
-  ┌──────────┐            │    │
-  │dashboard ├────────────┘    │
-  └──────────┘                 │
-                               │
-  (dashboard also depends      │
-   on redis being healthy) ────┘
-```
-
-### Failure Scenarios
-
-| Scenario | Behavior |
-|----------|----------|
-| Redis fails to start | Pipeline and dashboard will not start; Docker retries redis up to 5 times |
-| MLflow fails to start | Pipeline waits; training can proceed without MLflow but experiment tracking will be unavailable |
-| Pipeline crashes during training | `restart: on-failure:3` retries up to 3 times; `pipeline_state.json` enables resumption from last checkpoint |
-| Dashboard crashes | `restart: unless-stopped` auto-restarts; dashboard reads from files/Redis so state is preserved |
-
----
-
-## 6. Deployment Procedures
-
-### 6.1 First-Time Deployment
+### 2.2 Quick Start
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/<your-username>/capstone.git
 cd capstone
 
-# 2. (Optional) Configure parameters
-#    Edit config/*.yaml files or create a .env file
-cp .env.example .env
-vim .env
+# 2. (Optional) Create .env to override defaults
+cat > .env <<'EOF'
+PIPELINE_MODE=all
+SMALL=true
+VERBOSE=false
+EOF
 
-# 3. Create required directories
-mkdir -p data/raw data/features models results mlruns
-
-# 4. Build and start all services
+# 3. Build and start all services
 docker compose up --build
 
-# 5. Monitor pipeline progress
+# 4. Monitor pipeline progress
 docker compose logs -f pipeline
 
-# 6. Access services once pipeline completes
+# 5. Access services once pipeline completes
 #    Dashboard:  http://localhost:8501
-#    MLflow UI:  http://localhost:5000
-#    API Docs:   http://localhost:8000/docs
+#    MLflow UI:  http://localhost:5001
 ```
 
-### 6.2 Pipeline Execution Modes
-
-Run specific pipeline modes via environment variable override:
+**Common quick-start scenarios:**
 
 ```bash
-# Full training pipeline (default)
-docker compose up --build
+# Full pipeline with small dataset (fastest)
+SMALL=true docker compose up --build
 
-# Run only uplift modeling (assumes training is complete)
-PIPELINE_MODE=uplift docker compose up pipeline
+# Dashboard only (skip pipeline, assumes data exists)
+SKIP_PIPELINE=true docker compose up dashboard
 
-# Run budget optimization with custom budget
-PIPELINE_MODE=optimize BUDGET_KRW=100000000 docker compose up pipeline
+# Train only
+PIPELINE_MODE=train docker compose up pipeline
 
-# Run all modes sequentially
-PIPELINE_MODE=all docker compose up pipeline
+# Detached mode (background)
+docker compose up -d --build
 
-# Quick test with small dataset
-SMALL_MODE=true NUM_CUSTOMERS=5000 docker compose up --build
+# Stop everything
+docker compose down
+
+# Full cleanup (remove volumes & images)
+docker compose down -v --rmi local
 ```
 
-Or override the command directly:
+### 2.3 Docker Compose Configuration
+
+The `docker-compose.yml` defines four services with the following key configuration:
+
+**MLflow Tracking Server:**
+- SQLite backend store (no PostgreSQL required)
+- Filesystem artifact store at `/mlflow/artifacts`
+- Health check: `curl -f http://localhost:5000/health`
+- Restart policy: `unless-stopped`
+
+**Redis:**
+- `redis:7-alpine` with AOF persistence enabled
+- Memory limit: 256 MB with LRU eviction
+- Health check: `redis-cli ping`
+
+**Pipeline:**
+- Runs the CLI entrypoint via `scripts/pipeline_entrypoint.sh`
+- Waits for both MLflow and Redis to be healthy before starting
+- Volumes bind-mount `config/`, `data/`, `src/`, `models/`, `results/`
+
+**Dashboard:**
+- Streamlit on port 8501 with headless mode enabled
+- Waits for pipeline to complete (`service_completed_successfully`)
+- Set `SKIP_PIPELINE=true` to skip waiting for pipeline
+- Health check: `curl -f http://localhost:8501/_stcore/health`
+
+### 2.4 Dockerfiles
+
+The project includes three Dockerfiles:
+
+| Dockerfile | Purpose | Key Features |
+|-----------|---------|-------------|
+| `Dockerfile.pipeline` | ML/DL training pipeline | `build-essential` for native extensions, `libgomp1` for OpenMP, configurable via env vars |
+| `Dockerfile.dashboard` | Streamlit dashboard | Minimal dependencies (no build tools), exposes port 8501, headless Streamlit |
+| `Dockerfile.mlflow` | MLflow tracking server | MLflow 2.12.1, SQLite backend, lightweight |
+
+**Building individual images:**
 
 ```bash
-docker compose run pipeline python src/main.py --mode train
-docker compose run pipeline python src/main.py --mode uplift
-docker compose run pipeline python src/main.py --mode optimize --budget 50000000
+docker build -f Dockerfile.pipeline -t churn-pipeline .
+docker build -f Dockerfile.dashboard -t churn-dashboard .
+docker build -f Dockerfile.mlflow -t churn-mlflow .
 ```
 
-### 6.3 Restarting After Failure
+### 2.5 Environment Variables
 
-The pipeline uses checkpoint-based recovery via `pipeline_state.json`:
+#### Pipeline Container
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PIPELINE_MODE` | `all` | Execution mode (see [CLI modes](#33-available-modes)) |
+| `SMALL` | `true` | `"true"` for reduced dataset (5K customers, 6 months) |
+| `BUDGET` | _(empty)_ | Budget cap for `optimize` mode (KRW) |
+| `VERBOSE` | `false` | `"true"` for DEBUG-level logging |
+| `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow server URL |
+| `REDIS_HOST` | `redis` | Redis hostname |
+| `REDIS_PORT` | `6379` | Redis port |
+| `PYTHONPATH` | `/app` | Python module search path |
+
+#### Dashboard Container
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAMLIT_SERVER_PORT` | `8501` | Streamlit server port |
+| `STREAMLIT_SERVER_ADDRESS` | `0.0.0.0` | Streamlit bind address |
+| `SKIP_PIPELINE` | `false` | `"true"` to skip waiting for pipeline |
+| `PIPELINE_MAX_RETRIES` | `1` | Max retries waiting for pipeline |
+| `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow server URL |
+| `REDIS_HOST` | `redis` | Redis hostname |
+
+#### Port Overrides
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MLFLOW_PORT` | `5001` | Host port for MLflow UI |
+| `REDIS_PORT` | `6379` | Host port for Redis |
+| `DASHBOARD_PORT` | `8501` | Host port for Streamlit dashboard |
+
+#### Override via .env File
+
+Create a `.env` file in the project root:
 
 ```bash
-# 1. Check pipeline state
-cat pipeline_state.json
-
-# 2. Identify the failed step and check logs
-docker compose logs pipeline | tail -100
-
-# 3. Fix the issue (e.g., configuration change, resource limit)
-
-# 4. Restart — completed steps are automatically skipped
-docker compose up pipeline
+# .env
+PIPELINE_MODE=all
+SMALL=true
+BUDGET=50000000
+VERBOSE=false
+DASHBOARD_PORT=8501
+MLFLOW_PORT=5001
 ```
 
-**Force re-run from scratch** (clears all checkpoints):
+Docker Compose automatically loads this file. Use a custom env file:
 
 ```bash
-# Reset pipeline state
-echo '{}' > pipeline_state.json
-
-# Clear generated data
-rm -rf data/raw/* data/features/* models/* results/*
-
-# Rebuild and restart
-docker compose up --build
+docker compose --env-file .env.production up --build
 ```
 
-### 6.4 Updating Configuration
+### 2.6 Volumes & Networking
 
-YAML configuration files are bind-mounted, so changes take effect on container restart:
+**Named Docker Volumes:**
+
+| Volume | Mount Point | Purpose |
+|--------|-----------|---------|
+| `mlflow-data` | `/mlflow` | MLflow database and artifacts |
+| `redis-data` | `/data` | Redis AOF persistence |
+| `pipeline-output` | `/app/output` | Pipeline output artifacts |
+
+**Bind Mounts (shared between pipeline & dashboard):**
+
+| Host Path | Container Path | Purpose |
+|-----------|---------------|---------|
+| `./config/` | `/app/config/` | YAML configuration files |
+| `./data/` | `/app/data/` | Raw & processed data |
+| `./src/` | `/app/src/` | Source code (live reload in dev) |
+| `./models/` | `/app/models/` | Trained model artifacts |
+| `./results/` | `/app/results/` | Output CSVs, plots, reports |
+
+**Networking:**
+
+All services communicate over the `churn-network` Docker bridge network.
+Services reference each other by service name (e.g., `redis:6379`, `mlflow:5000`).
+
+### 2.7 Service Dependencies & Health Checks
+
+**Startup Order:**
+
+```
+1. redis     ─── starts first (no dependencies)
+2. mlflow    ─── starts in parallel with redis (no dependencies)
+3. pipeline  ─── waits for redis [healthy] AND mlflow [healthy]
+4. dashboard ─── waits for redis [healthy], mlflow [healthy], AND pipeline [completed]
+```
+
+**Health Checks:**
+
+| Service | Check | Interval | Timeout | Retries | Start Period |
+|---------|-------|----------|---------|---------|-------------|
+| `redis` | `redis-cli ping` | 10s | 5s | 3 | — |
+| `mlflow` | `curl -f http://localhost:5000/health` | 15s | 10s | 5 | 10s |
+| `dashboard` | `curl -f http://localhost:8501/_stcore/health` | 30s | 10s | 3 | 20s |
+
+**Failure Scenarios:**
+
+| Scenario | Behavior |
+|----------|----------|
+| Redis fails | Pipeline and dashboard will not start |
+| MLflow fails | Pipeline waits for health check; retries up to 5 times |
+| Pipeline crashes | Dashboard will not launch (depends on `service_completed_successfully`) |
+| Pipeline crashes + `SKIP_PIPELINE=true` | Dashboard launches regardless |
+| Dashboard crashes | Auto-restarts via `restart: unless-stopped` |
+
+---
+
+## 3. CLI Usage Guide
+
+### 3.1 Overview
+
+The CLI entrypoint (`src/main.py`) is the primary interface for running all system
+components. It supports 14 execution modes covering data generation, model training,
+analysis, optimization, and visualization.
+
+### 3.2 Command Syntax
 
 ```bash
-# 1. Edit configuration
-vim config/simulator_config.yaml
+python src/main.py --mode <MODE> [OPTIONS]
 
-# 2. Restart only the affected service
-docker compose restart pipeline
+# Or as a Python module:
+python -m src.main --mode <MODE> [OPTIONS]
+```
 
-# 3. Or restart with a fresh pipeline state
-echo '{}' > pipeline_state.json
-docker compose restart pipeline
+### 3.3 Available Modes
+
+| Mode | Description | Prerequisites |
+|------|-------------|--------------|
+| `simulate` | Generate synthetic customer data | None |
+| `train` | Train ML, DL, and Ensemble churn models | `simulate` (data in `data/raw/`) |
+| `uplift` | Train uplift model (T-Learner/S-Learner) and 4-quadrant segmentation | `simulate` |
+| `clv` | Predict Customer Lifetime Value (BG/NBD) | `simulate` |
+| `optimize` | LP-based budget optimization across segments | `uplift` + `clv` (or uses synthetic data) |
+| `ab_test` | A/B test power analysis and significance testing | `simulate` (uses treatment groups) |
+| `survival` | Cox Proportional Hazards survival analysis | `simulate` + features |
+| `recommend` | Generate personalized retention recommendations | `simulate` (+ optional `uplift`, `clv`) |
+| `cohort` | Cohort retention analysis with heatmaps | `simulate` (events data) |
+| `segment` | Customer segmentation (RFM-based) | `simulate` + features |
+| `features` | Run feature engineering pipeline only | `simulate` |
+| `monitor` | Model monitoring (PSI & KS drift detection) | `simulate` + features |
+| `dashboard` | Launch Streamlit dashboard (localhost:8501) | Results from other modes |
+| `all` | Run full end-to-end pipeline with checkpoint/resume | None |
+
+### 3.4 Flags & Options
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--mode` | str | _(required)_ | Execution mode (see table above) |
+| `--config` | str | `config/simulator_config.yaml` | Path to YAML configuration file |
+| `--data` | str | `data/raw/` | Data directory for input files |
+| `--output` | str | _(auto)_ | Output base directory (creates `results/` and `models/` subdirs) |
+| `--budget` | int | _(from config)_ | Total marketing budget in KRW (for `optimize` mode) |
+| `--small` | flag | `false` | Enable small mode: 5,000 customers, 6 months |
+| `--learner` | str | `t_learner` | Uplift learner type: `t_learner` or `s_learner` |
+| `--cohort-type` | str | `monthly` | Cohort type: `monthly`, `weekly`, or `behavioral` |
+| `-v, --verbose` | flag | `false` | Enable DEBUG logging level |
+| `-q, --quiet` | flag | `false` | Suppress output (WARNING level only) |
+
+### 3.5 Usage Examples
+
+**Data Simulation:**
+
+```bash
+# Generate full dataset (20,000 customers, 12 months)
+python src/main.py --mode simulate
+
+# Generate small dataset (5,000 customers, 6 months)
+python src/main.py --mode simulate --small
+
+# Custom config
+python src/main.py --mode simulate --config config/custom_config.yaml
+```
+
+**Model Training:**
+
+```bash
+# Train ML, DL, and Ensemble models
+python src/main.py --mode train
+
+# Train with verbose logging
+python src/main.py --mode train -v
+
+# Train on small dataset
+python src/main.py --mode train --small
+```
+
+**Uplift Modeling:**
+
+```bash
+# T-Learner uplift model (default)
+python src/main.py --mode uplift
+
+# S-Learner uplift model
+python src/main.py --mode uplift --learner s_learner
+```
+
+**Budget Optimization:**
+
+```bash
+# Optimize with default budget from config
+python src/main.py --mode optimize
+
+# Optimize with custom budget (50M KRW)
+python src/main.py --mode optimize --budget 50000000
+
+# Optimize with 100M KRW budget
+python src/main.py --mode optimize --budget 100000000
+```
+
+**Analysis Modes:**
+
+```bash
+# CLV prediction
+python src/main.py --mode clv
+
+# A/B test analysis
+python src/main.py --mode ab_test
+
+# Survival analysis (Cox PH)
+python src/main.py --mode survival
+
+# Cohort retention analysis (monthly)
+python src/main.py --mode cohort --cohort-type monthly
+
+# Weekly cohort analysis
+python src/main.py --mode cohort --cohort-type weekly
+```
+
+**Monitoring & Other:**
+
+```bash
+# Model drift detection
+python src/main.py --mode monitor
+
+# Feature engineering only
+python src/main.py --mode features
+
+# Customer segmentation
+python src/main.py --mode segment
+
+# Personalized recommendations
+python src/main.py --mode recommend
+```
+
+**Dashboard:**
+
+```bash
+# Launch Streamlit dashboard
+python src/main.py --mode dashboard
+```
+
+### 3.6 Running via Docker
+
+The pipeline container uses `scripts/pipeline_entrypoint.sh` to translate environment
+variables into CLI flags:
+
+```bash
+# Via environment variables (Docker Compose style)
+PIPELINE_MODE=train docker compose up pipeline
+PIPELINE_MODE=optimize BUDGET=50000000 docker compose up pipeline
+PIPELINE_MODE=simulate SMALL=true docker compose up pipeline
+
+# Via direct CLI override (docker compose run)
+docker compose run pipeline python -m src.main --mode train
+docker compose run pipeline python -m src.main --mode optimize --budget 50000000
+docker compose run pipeline python -m src.main --mode simulate --small -v
+
+# Full pipeline with small dataset
+SMALL=true docker compose up --build
+```
+
+**Environment-to-CLI mapping in `pipeline_entrypoint.sh`:**
+
+| Environment Variable | CLI Flag | Example |
+|---------------------|---------|---------|
+| `PIPELINE_MODE=train` | `--mode train` | `PIPELINE_MODE=train docker compose up pipeline` |
+| `SMALL=true` | `--small` | `SMALL=true docker compose up pipeline` |
+| `BUDGET=50000000` | `--budget 50000000` | `BUDGET=50000000 docker compose up pipeline` |
+| `VERBOSE=true` | `-v` | `VERBOSE=true docker compose up pipeline` |
+
+### 3.7 Running via Python Module
+
+```bash
+# Direct invocation
+python src/main.py --mode train
+
+# As a module (works from project root)
+python -m src.main --mode train
+
+# The __main__.py entrypoint enables:
+python -m src --mode train
+```
+
+### 3.8 Full Pipeline (`--mode all`)
+
+The `all` mode runs the complete end-to-end pipeline in this order:
+
+```
+1. data_generation       → simulate customer data
+2. preprocessing         → initial data prep
+3. feature_engineering   → compute feature matrix
+4. ml_model_training     → train ML models (XGBoost, LightGBM)
+5. dl_model_training     → train deep learning model (PyTorch)
+6. ensemble_creation     → build ensemble from ML + DL
+7. uplift_modeling       → T-Learner uplift model
+8. clv_prediction        → BG/NBD lifetime value
+9. budget_optimization   → LP-based budget allocation
+10. ab_testing           → A/B test statistical analysis
+11. survival_analysis    → Cox PH survival curves
+12. recommendations      → personalized retention actions
+13. scoring_api_setup    → model monitoring
+14. mlflow_logging       → experiment tracking
+```
+
+**Checkpoint/Resume:** The pipeline stores state in `data/raw/pipeline_state.json`.
+On restart, completed stages are automatically skipped:
+
+```bash
+# First run (may fail at step 8)
+python src/main.py --mode all --small
+
+# Resume from last checkpoint (steps 1-7 are skipped)
+python src/main.py --mode all --small
+
+# Force re-run from scratch
+rm data/raw/pipeline_state.json
+python src/main.py --mode all --small
+```
+
+**Output:** Each mode handler returns a JSON result to stdout:
+
+```json
+{
+  "mode": "train",
+  "status": "completed",
+  "ml_metrics": {"auc_roc": 0.862, "accuracy": 0.84},
+  "dl_metrics": {"auc_roc": 0.847, "accuracy": 0.82}
+}
 ```
 
 ---
 
-## 7. Scaling Considerations
+## 4. Streamlit Dashboard Configuration
 
-### 7.1 Horizontal Scaling
+### 4.1 Dashboard Views
 
-The current architecture is designed for **single-node deployment** (development
-and capstone evaluation). For production horizontal scaling:
+The Streamlit dashboard (`src/dashboard/app.py`) provides interactive views for all
+system outputs. Views are accessible via a sidebar navigation.
 
-| Component | Scaling Strategy |
-|-----------|-----------------|
-| **Dashboard** | Run multiple Streamlit replicas behind a load balancer (nginx/traefik). Each instance is stateless and reads from shared volumes. |
-| **API (Scoring)** | Extract the FastAPI scoring service from the pipeline container into a separate, independently scalable service with Gunicorn + Uvicorn workers. |
-| **Redis** | Use Redis Cluster or Redis Sentinel for high availability. Current single-node Redis is sufficient for < 100K customers. |
-| **MLflow** | Migrate backend store from SQLite to PostgreSQL. Use S3-compatible storage for artifacts. |
-| **Pipeline** | Pipeline is a batch job — scale vertically (more CPU/RAM) rather than horizontally. For distributed training, integrate with Ray or Dask. |
+| View | Description | Data Source |
+|------|-------------|------------|
+| **Churn Overview** | KPI cards, churn rate, risk distribution, top features | `results/model_metrics.json`, features |
+| **Model Performance** | ML vs DL vs Ensemble comparison, ROC curves, confusion matrices | `results/model_metrics.json`, `models/` |
+| **Uplift Modeling** | 4-quadrant segmentation, treatment effect distribution | `results/uplift_results.csv` |
+| **CLV Analysis** | CLV distribution, top customers, segment breakdown | `results/clv_predictions.csv` |
+| **A/B Testing** | Power analysis, significance results, confidence intervals | `results/ab_test_results.json` |
+| **Survival Analysis** | Kaplan-Meier curves, Cox PH hazard ratios | `results/survival_results.json` |
+| **Cohort Retention** | Retention heatmap, cohort curves | `results/cohort_retention_matrix.csv` |
+| **Budget Optimization** | Allocation by segment, what-if scenarios | `results/budget_optimization.csv` |
+| **Recommendations** | Per-customer retention actions, priority ranking | `results/recommendations.csv` |
+| **Model Monitoring** | PSI/KS drift scores, performance trends | `results/monitoring_report.json` |
+| **System Health** | Container status, pipeline state, resource usage | Pipeline state, Redis |
 
-**Example: Scaling the dashboard with replicas:**
+### 4.2 Launching the Dashboard
+
+**Via CLI:**
+
+```bash
+# Launch from project root (localhost:8501)
+python src/main.py --mode dashboard
+
+# Or directly with Streamlit
+streamlit run src/dashboard/app.py \
+  --server.port 8501 \
+  --server.address localhost \
+  --server.headless true
+```
+
+**Via Docker Compose:**
+
+```bash
+# Dashboard with full pipeline
+docker compose up --build
+
+# Dashboard only (skip pipeline)
+SKIP_PIPELINE=true docker compose up dashboard
+
+# Custom port
+DASHBOARD_PORT=9000 docker compose up dashboard
+```
+
+**Via Docker standalone:**
+
+```bash
+docker build -f Dockerfile.dashboard -t churn-dashboard .
+docker run -p 8501:8501 \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/results:/app/results \
+  -v $(pwd)/models:/app/models \
+  churn-dashboard
+```
+
+### 4.3 Configuration Options
+
+The dashboard reads all configuration from `config/simulator_config.yaml`:
+
+```yaml
+# Key dashboard-relevant configuration sections:
+
+simulation:
+  random_seed: 42
+  num_customers: 20000
+
+churn_definition:
+  no_purchase_days: 30
+  no_login_days: 60
+  operator: "OR"
+
+treatment:
+  treatment_ratio: 0.50
+```
+
+**Streamlit server configuration** can be set via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAMLIT_SERVER_PORT` | `8501` | Server port |
+| `STREAMLIT_SERVER_ADDRESS` | `0.0.0.0` | Bind address (`localhost` for local dev) |
+| `STREAMLIT_SERVER_HEADLESS` | `true` | Don't auto-open browser |
+| `STREAMLIT_BROWSER_GATHER_USAGE_STATS` | `false` | Disable telemetry |
+
+Or via `.streamlit/config.toml` in the project root:
+
+```toml
+[server]
+port = 8501
+address = "0.0.0.0"
+headless = true
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+```
+
+### 4.4 Data Sources
+
+The dashboard loads data through `src/dashboard/data_loader.py`, which reads from:
+
+| Directory | File(s) | View(s) |
+|-----------|---------|---------|
+| `results/` | `model_metrics.json` | Churn Overview, Model Performance |
+| `results/` | `uplift_results.csv` | Uplift Modeling |
+| `results/` | `clv_predictions.csv` | CLV Analysis |
+| `results/` | `ab_test_results.json` | A/B Testing |
+| `results/` | `survival_results.json` | Survival Analysis |
+| `results/` | `cohort_retention_matrix.csv` | Cohort Retention |
+| `results/` | `budget_optimization.csv` | Budget Optimization |
+| `results/` | `recommendations.csv` | Recommendations |
+| `results/` | `monitoring_report.json` | Model Monitoring |
+| `models/` | `*.pkl`, `*.pt` | Model artifacts |
+| `data/raw/` | `customers.parquet`, `events.parquet` | Raw data views |
+| `config/` | `simulator_config.yaml` | System configuration |
+
+> **Note:** If a result file is missing, the dashboard degrades gracefully by
+> showing a "No data available" message for that view. Run the corresponding
+> CLI mode to generate the data.
+
+### 4.5 Dashboard Customization
+
+**Adding new views:**
+
+1. Create a new view module in `src/dashboard/` (e.g., `custom_view.py`)
+2. Define a `render_custom_view(config, data_loader)` function
+3. Import and register in `src/dashboard/app.py`
+4. Add to the `PAGES` list in `src/dashboard/utils/dashboard_helpers.py`
+
+**Helper utilities** available in `src/dashboard/utils/dashboard_helpers.py`:
+
+| Function | Purpose |
+|----------|---------|
+| `format_currency(value)` | Format KRW currency values |
+| `format_percentage(value)` | Format percentages with 1 decimal |
+| `format_count(value)` | Format large numbers with commas |
+| `classify_risk(prob)` | Classify churn probability into risk levels |
+| `get_risk_color(risk_level)` | Get color for risk visualization |
+| `get_color_palette()` | Get consistent color palette |
+| `get_segment_colors()` | Get segment-specific colors |
+| `build_sidebar_info(config)` | Build sidebar metadata |
+| `validate_predictions(df)` | Validate prediction dataframes |
+
+---
+
+## 5. Production Deployment Guidelines
+
+### 5.1 Production Migration Path
+
+| Component | Development (Current) | Production (Recommended) |
+|-----------|----------------------|--------------------------|
+| **MLflow Backend** | SQLite (`sqlite:////mlflow/mlflow.db`) | PostgreSQL (`postgresql://...`) |
+| **MLflow Artifacts** | Local filesystem (`/mlflow/artifacts`) | S3 / MinIO (`s3://bucket/artifacts`) |
+| **Redis** | Single node, no auth, 256 MB | Redis Sentinel/Cluster with AUTH, 2+ GB |
+| **API Auth** | None | OAuth2 / JWT tokens |
+| **Secrets** | `.env` file | Docker Secrets / HashiCorp Vault |
+| **Logging** | stdout/stderr | ELK Stack / CloudWatch / Loki |
+| **Monitoring** | File-based (`monitoring_report.json`) | Prometheus + Grafana |
+| **Orchestration** | Docker Compose | Kubernetes (Helm charts) |
+| **CI/CD** | Manual `docker compose up` | GitHub Actions + ArgoCD |
+| **TLS** | None | Terminate at reverse proxy (nginx/traefik) |
+
+### 5.2 Scaling Considerations
+
+**Horizontal Scaling:**
+
+| Component | Strategy |
+|-----------|---------|
+| **Dashboard** | Stateless — run N replicas behind a load balancer |
+| **Pipeline** | Batch job — scale vertically (more CPU/RAM); for distributed training use Ray/Dask |
+| **Redis** | Redis Cluster or Sentinel for HA; current single-node sufficient for < 100K customers |
+| **MLflow** | Migrate to PostgreSQL backend; S3 for artifacts |
+
+**Example: Dashboard behind nginx:**
 
 ```yaml
 # docker-compose.override.yml
@@ -612,7 +735,7 @@ services:
   dashboard:
     deploy:
       replicas: 3
-    ports: []  # Remove host port mapping; use load balancer instead
+    ports: []  # Remove host port; use load balancer
 
   nginx:
     image: nginx:alpine
@@ -624,9 +747,18 @@ services:
       - dashboard
 ```
 
-### 7.2 Vertical Scaling (Resource Limits)
+### 5.3 Resource Limits
 
-Configure resource limits to prevent containers from consuming all host resources:
+**Recommended resource allocation by dataset size:**
+
+| Dataset Size | Pipeline RAM | Pipeline CPU | Total System RAM |
+|-------------|-------------|-------------|------------------|
+| 5K customers (small) | 2 GB | 2 cores | 6 GB |
+| 20K customers (default) | 4–6 GB | 4 cores | 10 GB |
+| 100K customers | 16 GB | 8 cores | 24 GB |
+| 500K+ customers | 32 GB+ | 16 cores | 48 GB+ |
+
+**Docker Compose resource limits:**
 
 ```yaml
 # docker-compose.override.yml
@@ -663,213 +795,104 @@ services:
           memory: 1G
 ```
 
-**Recommended resource allocation by dataset size:**
+### 5.4 Security Hardening
 
-| Dataset Size | Pipeline RAM | Pipeline CPU | Total System RAM |
-|-------------|-------------|-------------|------------------|
-| 5K customers (small mode) | 2 GB | 2 cores | 6 GB |
-| 20K customers (default) | 4-6 GB | 4 cores | 10 GB |
-| 100K customers | 16 GB | 8 cores | 24 GB |
-| 500K+ customers | 32 GB+ | 16 cores | 48 GB+ |
+**Network Isolation:**
 
-### 7.3 Data Volume Scaling
+```yaml
+# docker-compose.prod.yml
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true  # No external access
 
-| Data Component | 20K Customers | 100K Customers | 500K Customers |
-|---------------|--------------|----------------|----------------|
-| Raw event logs | ~200 MB | ~1 GB | ~5 GB |
-| Feature store (Parquet) | ~50 MB | ~250 MB | ~1.2 GB |
-| Trained models | ~100 MB | ~150 MB | ~200 MB |
-| MLflow artifacts | ~200 MB | ~500 MB | ~1 GB |
-| **Total disk** | **~600 MB** | **~2 GB** | **~8 GB** |
-
-For large datasets (> 100K customers), consider:
-- Switching feature store from Parquet files to a columnar database (DuckDB, ClickHouse)
-- Using chunked processing in the feature engineering pipeline
-- Enabling Redis persistence with RDB snapshots instead of AOF
-
-### 7.4 Redis Scaling
-
-Current Redis configuration is optimized for the default 20K customer dataset:
-
-```
-maxmemory: 512mb
-maxmemory-policy: allkeys-lru
+services:
+  redis:
+    networks: [backend]
+  mlflow:
+    networks: [backend]
+  pipeline:
+    networks: [frontend, backend]
+  dashboard:
+    networks: [frontend, backend]
 ```
 
-**Scaling Redis memory by dataset size:**
+**Redis Authentication:**
 
-| Customers | Recommended maxmemory | Key Count (approx.) |
-|-----------|----------------------|---------------------|
-| 5K | 128mb | ~15K keys |
-| 20K | 512mb | ~60K keys |
-| 100K | 2gb | ~300K keys |
-| 500K | 8gb | ~1.5M keys |
-
-Redis keys include:
-- `score:{customer_id}` — cached churn scores (TTL: 300s)
-- `features:{customer_id}` — cached feature vectors (TTL: 600s)
-- `customer_events` — Redis Stream for real-time event ingestion
-
-### 7.5 Production Migration Path
-
-For moving from development to production:
-
-| Component | Development | Production |
-|-----------|-------------|------------|
-| **MLflow Backend** | SQLite (`sqlite:///mlruns/mlflow.db`) | PostgreSQL (`postgresql://...`) |
-| **MLflow Artifacts** | Local filesystem (`/app/mlruns/artifacts`) | S3 / MinIO (`s3://bucket/artifacts`) |
-| **Redis** | Single node, no auth | Redis Sentinel/Cluster with AUTH |
-| **API Auth** | Static API key | OAuth2 / JWT tokens |
-| **Secrets** | `.env` file | Docker Secrets / Vault |
-| **Logging** | stdout/stderr | ELK Stack / CloudWatch |
-| **Monitoring** | File-based (`monitoring_report.json`) | Prometheus + Grafana |
-| **Orchestration** | Docker Compose | Kubernetes (Helm charts) |
-| **CI/CD** | Manual `docker compose up` | GitHub Actions + ArgoCD |
-
----
-
-## 8. Monitoring Setup
-
-### 8.1 Pipeline State Monitoring
-
-The pipeline tracks execution state in `pipeline_state.json`:
-
-```json
-{
-  "simulation": "completed",
-  "feature_engineering": "completed",
-  "ml_training": "completed",
-  "dl_training": "completed",
-  "ensemble": "completed",
-  "uplift_modeling": "completed",
-  "clv_prediction": "completed",
-  "segmentation": "completed",
-  "budget_optimization": "completed",
-  "ab_testing": "completed",
-  "survival_analysis": "completed",
-  "monitoring": "completed",
-  "recommendations": "completed",
-  "timestamp": "2026-03-21T10:00:00",
-  "total_duration_seconds": 1847
-}
+```yaml
+redis:
+  command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD}"
+  environment:
+    - REDIS_PASSWORD=${REDIS_PASSWORD}
 ```
 
-Each step has one of three states:
-- `completed` — step finished successfully
-- `failed` — step encountered an error (details in logs)
-- `pending` — step has not yet been executed
+**Non-root containers:**
 
-**Check pipeline state:**
+```dockerfile
+# Add to Dockerfiles
+RUN useradd -m -r appuser
+USER appuser
+```
+
+**Sensitive files — never commit to version control:**
+
+```gitignore
+# .gitignore
+.env
+.env.production
+config/secrets.yaml
+*.pem
+*.key
+```
+
+### 5.5 Monitoring & Observability
+
+**Container health monitoring:**
 
 ```bash
-# From host
-cat pipeline_state.json | python -m json.tool
-
-# From within Docker
-docker compose exec pipeline cat /app/pipeline_state.json
-```
-
-### 8.2 Container Health Monitoring
-
-Monitor container status and resource usage:
-
-```bash
-# Container status (includes health check results)
+# Container status (includes health checks)
 docker compose ps
 
 # Real-time resource usage
 docker stats churn-pipeline churn-dashboard churn-redis churn-mlflow
 
-# Individual container health
-docker inspect --format='{{.State.Health.Status}}' churn-redis
-docker inspect --format='{{.State.Health.Status}}' churn-mlflow
-
-# Service logs (all services)
+# Service logs
 docker compose logs -f --tail=100
-
-# Service logs (specific service)
 docker compose logs -f pipeline
 docker compose logs -f dashboard
 ```
 
-**Expected healthy output from `docker compose ps`:**
+**Pipeline state monitoring:**
 
-```
-NAME              COMMAND                 STATUS                    PORTS
-churn-redis       "redis-server ..."      Up 2 hours (healthy)      0.0.0.0:6379->6379/tcp
-churn-mlflow      "mlflow server ..."     Up 2 hours (healthy)      0.0.0.0:5000->5000/tcp
-churn-pipeline    "python src/main.py"    Up 2 hours                0.0.0.0:8000->8000/tcp
-churn-dashboard   "streamlit run ..."     Up 2 hours                0.0.0.0:8501->8501/tcp
-```
-
-### 8.3 Model Performance Monitoring
-
-Model metrics are tracked in two places:
-
-**1. MLflow UI (http://localhost:5000):**
-- AUC-ROC, Precision, Recall, F1 for ML and DL models
-- Ensemble performance metrics
-- Hyperparameter values and training parameters
-- Model artifacts and version history
-
-**2. Results directory (`results/`):**
-
-| File | Contents |
-|------|----------|
-| `monitoring_report.json` | PSI/KS drift scores, threshold alerts, performance trends |
-| `model_metrics.json` | Latest training/test metrics for all models |
-| `shap_summary.png` | SHAP feature importance visualization |
-
-**Query MLflow metrics programmatically:**
+The pipeline tracks execution state in `data/raw/pipeline_state.json`:
 
 ```bash
-# List experiments
-curl -s http://localhost:5000/api/2.0/mlflow/experiments/search | python -m json.tool
+# Check pipeline progress
+cat data/raw/pipeline_state.json | python -m json.tool
 
-# Get run metrics
-curl -s "http://localhost:5000/api/2.0/mlflow/runs/search" \
-  -d '{"experiment_ids": ["1"]}' | python -m json.tool
+# From within Docker
+docker compose exec pipeline cat /app/data/raw/pipeline_state.json
 ```
 
-### 8.4 Data Drift Detection
+**MLflow experiment tracking:**
 
-The monitoring module (`src/monitoring/drift_detector.py`) computes:
+```bash
+# Access MLflow UI
+open http://localhost:5001
 
-| Metric | Description | Alert Threshold |
-|--------|-------------|----------------|
-| **PSI** (Population Stability Index) | Measures distribution shift between training and scoring data | PSI > 0.2 (significant drift) |
-| **KS-test** (Kolmogorov-Smirnov) | Statistical test for distribution difference per feature | p-value < 0.05 |
-| **Feature mean/std shift** | Tracks statistical moments over time | > 2 standard deviations from training baseline |
-
-**Monitoring report structure (`results/monitoring_report.json`):**
-
-```json
-{
-  "timestamp": "2026-03-21T10:00:00",
-  "overall_drift_detected": false,
-  "psi_scores": {
-    "days_since_last_purchase": 0.08,
-    "purchase_frequency_change_4w": 0.12,
-    "session_duration_trend": 0.05
-  },
-  "ks_test_results": {
-    "days_since_last_purchase": {"statistic": 0.04, "p_value": 0.32},
-    "purchase_frequency_change_4w": {"statistic": 0.07, "p_value": 0.08}
-  },
-  "alerts": [],
-  "model_performance": {
-    "auc_roc": 0.861,
-    "auc_roc_baseline": 0.858,
-    "performance_degradation": false
-  }
-}
+# Query metrics via API
+curl -s http://localhost:5001/api/2.0/mlflow/experiments/search | python -m json.tool
 ```
 
-### 8.5 Log Aggregation
+**Model drift monitoring:**
 
-All services write logs to stdout/stderr, collected by Docker's logging driver.
+The `monitor` mode computes PSI and KS statistics for detecting data drift.
+Results are saved to `results/monitoring_report.json` and displayed on the
+dashboard's Model Monitoring view.
 
-**Configure structured JSON logging:**
+**Structured logging (production):**
 
 ```yaml
 # docker-compose.override.yml
@@ -890,78 +913,50 @@ services:
         max-file: "3"
 ```
 
-**View logs with timestamps:**
+### 5.6 Backup & Recovery
+
+**Data backup:**
 
 ```bash
-# All services with timestamps
-docker compose logs -f --timestamps
+# Backup all persistent data
+tar czf backup_$(date +%Y%m%d).tar.gz data/ models/ results/ config/
 
-# Pipeline only, last 200 lines
-docker compose logs -f --tail=200 pipeline
+# Backup MLflow data
+docker compose exec mlflow tar czf /tmp/mlflow_backup.tar.gz /mlflow
+docker compose cp mlflow:/tmp/mlflow_backup.tar.gz ./backups/
 
-# Export logs to file
-docker compose logs pipeline > logs/pipeline_$(date +%Y%m%d).log
+# Backup Redis
+docker compose exec redis redis-cli BGSAVE
+docker compose cp redis:/data/appendonly.aof ./backups/
 ```
 
-**Application log levels** (configurable via `LOG_LEVEL` env var):
+**Recovery:**
 
-| Level | Description |
-|-------|-------------|
-| `DEBUG` | Detailed execution trace (feature engineering steps, model layer outputs) |
-| `INFO` | Pipeline progress, metrics, completion messages (default) |
-| `WARNING` | Non-fatal issues (missing optional features, fallback behavior) |
-| `ERROR` | Step failures, exceptions, data validation errors |
+```bash
+# Restore data
+tar xzf backup_20260321.tar.gz
 
-### 8.6 Alert Configuration
-
-For automated alerting, integrate with external monitoring tools:
-
-**Option A: Simple file-based alerting (built-in)**
-
-The pipeline writes alerts to `results/alerts.json` when drift or performance
-degradation is detected. The dashboard displays these alerts on the Monitoring tab.
-
-**Option B: Webhook-based alerting (custom)**
-
-Configure alert webhooks in `config/monitoring_config.yaml`:
-
-```yaml
-monitoring:
-  alerts:
-    enabled: true
-    check_interval_hours: 24
-    channels:
-      - type: slack
-        webhook_url: "https://hooks.slack.com/services/..."
-        events: ["drift_detected", "model_degradation", "pipeline_failure"]
-      - type: email
-        smtp_host: "smtp.gmail.com"
-        smtp_port: 587
-        recipients: ["team@example.com"]
-        events: ["pipeline_failure"]
-    thresholds:
-      psi_warning: 0.1
-      psi_critical: 0.2
-      auc_drop_warning: 0.02
-      auc_drop_critical: 0.05
+# Restart services
+docker compose down
+docker compose up --build
 ```
 
 ---
 
-## 9. Troubleshooting
+## 6. Troubleshooting
 
 ### Common Issues
 
 | Problem | Likely Cause | Solution |
 |---------|-------------|----------|
-| `redis` container exits immediately | Port 6379 already in use | `lsof -i :6379` and stop conflicting process, or change port in compose |
-| Pipeline OOM killed | Insufficient memory for training | Increase Docker memory limit or use `SMALL_MODE=true` |
-| MLflow UI shows no experiments | `mlruns/` directory permissions | `chmod -R 777 mlruns/` or run containers as the same UID |
-| Dashboard shows "No data available" | Pipeline hasn't completed yet | Check `pipeline_state.json` and wait for completion |
-| Pipeline stuck at "pending" step | Previous step failed silently | Check logs: `docker compose logs pipeline` |
-| Redis connection refused | Redis not healthy yet | Wait for health check; increase `start_period` |
-| Models show poor performance | Wrong random seed or config | Verify `RANDOM_SEED=42` and check `config/` files |
-| Permission denied on volume mounts | Docker user/group mismatch | Add `user: "${UID}:${GID}"` to compose service |
+| Redis container exits | Port 6379 already in use | `lsof -i :6379` and stop conflicting process, or set `REDIS_PORT=6380` in `.env` |
+| Pipeline OOM killed | Insufficient memory | Increase Docker memory limit or use `SMALL=true` |
+| MLflow UI shows no experiments | Volume permissions | Check `mlflow-data` volume; restart `mlflow` service |
+| Dashboard "No data available" | Pipeline hasn't completed | Check pipeline logs: `docker compose logs pipeline` |
+| Dashboard won't start | Waiting for pipeline | Set `SKIP_PIPELINE=true` in `.env` |
+| Port conflicts | Services on default ports | Override ports via `DASHBOARD_PORT`, `MLFLOW_PORT`, `REDIS_PORT` in `.env` |
+| Import errors | `PYTHONPATH` not set | Ensure `PYTHONPATH=/app` in container or run from project root |
+| `FileNotFoundError: No customer data` | Data not generated | Run `--mode simulate` first |
 
 ### Diagnostic Commands
 
@@ -969,23 +964,20 @@ monitoring:
 # Full system status
 docker compose ps -a
 
-# Check container resource usage
+# Check resource usage
 docker stats --no-stream
 
-# Inspect a specific container
+# Shell into containers
 docker compose exec pipeline bash
-docker compose exec redis redis-cli info
+docker compose exec redis redis-cli
 
-# Test Redis connectivity from pipeline
+# Test Redis connectivity
 docker compose exec pipeline python -c "import redis; r=redis.Redis('redis'); print(r.ping())"
 
 # Test MLflow connectivity
 docker compose exec pipeline python -c "import mlflow; mlflow.set_tracking_uri('http://mlflow:5000'); print(mlflow.get_tracking_uri())"
 
-# Validate pipeline state
-docker compose exec pipeline python -c "import json; print(json.dumps(json.load(open('pipeline_state.json')), indent=2))"
-
-# Check disk usage by service
+# Check disk usage
 docker system df -v
 ```
 
@@ -995,15 +987,14 @@ docker system df -v
 # Stop everything
 docker compose down
 
-# Remove all generated data
-rm -rf data/raw/* data/features/* models/* results/* mlruns/*
-echo '{}' > pipeline_state.json
+# Remove generated data
+rm -rf data/raw/* models/* results/*
+
+# Remove Docker volumes
+docker compose down -v
 
 # Remove Docker images (force rebuild)
 docker compose down --rmi local
-
-# Remove volumes (including Redis data)
-docker compose down -v
 
 # Fresh start
 docker compose up --build
@@ -1011,64 +1002,7 @@ docker compose up --build
 
 ---
 
-## 10. Security Considerations
-
-### Development vs. Production
-
-| Aspect | Development (Current) | Production (Recommended) |
-|--------|----------------------|--------------------------|
-| API Key | Hardcoded in config (`churn-api-dev-key-2024`) | Rotate via Docker Secrets / env var |
-| Redis Auth | No password | Set `requirepass` in redis.conf |
-| MLflow Access | Open to all on network | Add authentication proxy (nginx + basic auth) |
-| Network | Docker bridge (all services visible) | Isolate services into frontend/backend networks |
-| Secrets | `.env` file | Docker Secrets, HashiCorp Vault, or cloud KMS |
-| TLS | None | Terminate TLS at load balancer or reverse proxy |
-| Container User | Root (default) | Non-root user with minimal privileges |
-
-### Network Isolation (Production)
-
-```yaml
-# docker-compose.prod.yml
-networks:
-  frontend:
-    driver: bridge
-  backend:
-    driver: bridge
-    internal: true  # No external access
-
-services:
-  redis:
-    networks:
-      - backend
-  mlflow:
-    networks:
-      - backend
-  pipeline:
-    networks:
-      - frontend   # API exposed to host
-      - backend    # Access to redis, mlflow
-  dashboard:
-    networks:
-      - frontend   # Streamlit exposed to host
-      - backend    # Access to redis for real-time data
-```
-
-### Sensitive Files
-
-Never commit these files to version control:
-
-```gitignore
-# .gitignore
-.env
-.env.production
-config/secrets.yaml
-*.pem
-*.key
-```
-
----
-
-## Appendix A: Quick Reference Commands
+## 7. Quick Reference
 
 ```bash
 # ──── Lifecycle ────
@@ -1076,7 +1010,39 @@ docker compose up --build              # Build and start all services
 docker compose up -d --build           # Detached mode
 docker compose down                    # Stop all services
 docker compose down -v                 # Stop and remove volumes
-docker compose restart pipeline        # Restart specific service
+docker compose restart dashboard       # Restart specific service
+
+# ──── Pipeline Modes (via env vars) ────
+PIPELINE_MODE=simulate SMALL=true docker compose up pipeline
+PIPELINE_MODE=train docker compose up pipeline
+PIPELINE_MODE=uplift docker compose up pipeline
+PIPELINE_MODE=clv docker compose up pipeline
+PIPELINE_MODE=optimize BUDGET=50000000 docker compose up pipeline
+PIPELINE_MODE=ab_test docker compose up pipeline
+PIPELINE_MODE=survival docker compose up pipeline
+PIPELINE_MODE=recommend docker compose up pipeline
+PIPELINE_MODE=cohort docker compose up pipeline
+PIPELINE_MODE=all SMALL=true docker compose up --build
+
+# ──── Pipeline Modes (via CLI) ────
+python src/main.py --mode simulate --small
+python src/main.py --mode train
+python src/main.py --mode uplift --learner t_learner
+python src/main.py --mode clv
+python src/main.py --mode optimize --budget 50000000
+python src/main.py --mode ab_test
+python src/main.py --mode survival
+python src/main.py --mode recommend
+python src/main.py --mode cohort --cohort-type monthly
+python src/main.py --mode segment
+python src/main.py --mode monitor
+python src/main.py --mode dashboard
+python src/main.py --mode all --small
+
+# ──── Dashboard ────
+SKIP_PIPELINE=true docker compose up dashboard   # Dashboard only
+DASHBOARD_PORT=9000 docker compose up dashboard   # Custom port
+streamlit run src/dashboard/app.py                # Local dev
 
 # ──── Monitoring ────
 docker compose ps                      # Service status
@@ -1084,46 +1050,31 @@ docker compose logs -f                 # Follow all logs
 docker compose logs -f pipeline        # Follow pipeline logs
 docker stats                           # Resource usage
 
-# ──── Pipeline ────
-PIPELINE_MODE=train docker compose up pipeline
-PIPELINE_MODE=uplift docker compose up pipeline
-PIPELINE_MODE=optimize docker compose up pipeline
-SMALL_MODE=true docker compose up --build
-
 # ──── Debugging ────
 docker compose exec pipeline bash      # Shell into pipeline
 docker compose exec redis redis-cli    # Redis CLI
-cat pipeline_state.json                # Check pipeline progress
 
 # ──── Cleanup ────
 docker compose down --rmi local -v     # Full cleanup
 docker system prune -f                 # Remove unused Docker resources
 ```
 
----
-
-## Appendix B: Port Reference
+### Port Reference
 
 | Port | Service | Protocol | Access |
 |------|---------|----------|--------|
 | 8501 | Streamlit Dashboard | HTTP | `http://localhost:8501` |
-| 8000 | Pipeline API (FastAPI) | HTTP | `http://localhost:8000` |
-| 5000 | MLflow Tracking Server | HTTP | `http://localhost:5000` |
-| 6379 | Redis | TCP | `localhost:6379` (or `redis:6379` internally) |
+| 5001 | MLflow Tracking Server | HTTP | `http://localhost:5001` |
+| 6379 | Redis | TCP | `localhost:6379` |
 
----
-
-## Appendix C: Configuration File Reference
+### Configuration File Reference
 
 | File | Description | Key Parameters |
 |------|-------------|---------------|
-| `config/simulator_config.yaml` | Simulation & persona settings | `num_customers`, `simulation_months`, `personas`, `churn_definition` |
-| `config/base_config.yaml` | Global paths and seed | `random_seed`, `paths`, `churn_definition` |
-| `config/feature_config.yaml` | Feature engineering | Feature list, window sizes, aggregation methods |
-| `config/model_config.yaml` | ML/DL hyperparameters | `train_months`, `test_months`, `ensemble_weights`, learning rates |
-| `config/uplift_config.yaml` | Uplift modeling | T-Learner/S-Learner settings, quadrant thresholds |
-| `config/optimization_config.yaml` | Budget optimization | `total_budget_krw`, what-if scenarios, constraint parameters |
-| `config/dashboard_config.yaml` | Dashboard layout | Tab configuration, chart settings, refresh intervals |
-| `config/api_config.yaml` | API settings | Auth key, rate limits, cache TTL, risk thresholds |
-| `docker-compose.yml` | Container orchestration | Service definitions, ports, volumes, dependencies |
-| `.env` | Environment overrides | Runtime variable overrides |
+| `config/simulator_config.yaml` | Simulation, personas, churn definition | `num_customers`, `simulation_months`, `churn_definition` |
+| `docker-compose.yml` | Container orchestration | Service definitions, ports, volumes |
+| `.env` | Environment overrides | `PIPELINE_MODE`, `SMALL`, `BUDGET`, port overrides |
+| `Dockerfile.pipeline` | Pipeline image | Python 3.10, build tools, entrypoint |
+| `Dockerfile.dashboard` | Dashboard image | Python 3.10, Streamlit, port 8501 |
+| `Dockerfile.mlflow` | MLflow image | MLflow 2.12.1, SQLite backend |
+| `scripts/pipeline_entrypoint.sh` | Docker pipeline entrypoint | Env-to-CLI flag translation |

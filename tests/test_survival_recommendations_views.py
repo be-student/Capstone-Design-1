@@ -501,9 +501,10 @@ class TestRecommendationsViewRender:
         subheader_calls = [
             call.args[0] for call in mock_streamlit.subheader.call_args_list
         ]
-        assert "Priority-Ranked Retention Actions" in subheader_calls
-        assert "Recommendation Type Distribution" in subheader_calls
-        assert "Expected Uplift by Customer" in subheader_calls
+        # render_recommendations delegates to render_recommendations_view
+        assert "Recommendation Distribution" in subheader_calls
+        assert "Expected Uplift Analysis" in subheader_calls
+        assert "Segment-Level Breakdown" in subheader_calls
 
     def test_handles_empty_recommendations(self, mock_streamlit, config):
         """Must handle empty recommendations gracefully."""

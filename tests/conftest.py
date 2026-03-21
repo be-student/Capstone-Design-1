@@ -497,3 +497,182 @@ def results_dir(tmp_path) -> Path:
     d = tmp_path / "results"
     d.mkdir()
     return d
+
+
+# ---------------------------------------------------------------------------
+# Sample data fixtures — dashboard display data
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sample_churn_predictions() -> pd.DataFrame:
+    """Sample churn prediction data for dashboard display tests.
+
+    Contains 500 customers with churn probability, risk level, segment,
+    recommended action, CLV, and recency metrics.
+    """
+    np.random.seed(42)
+    n = 500
+    return pd.DataFrame({
+        "customer_id": [f"C{i:05d}" for i in range(n)],
+        "churn_probability": np.random.beta(2, 5, n),
+        "risk_level": np.random.choice(
+            ["low", "medium", "high", "critical"],
+            n,
+            p=[0.4, 0.3, 0.2, 0.1],
+        ),
+        "segment": np.random.choice(
+            ["vip_loyal", "regular_loyal", "bargain_hunter",
+             "new_customer", "dormant", "high_value_at_risk"],
+            n,
+        ),
+        "recommended_action": np.random.choice(
+            ["coupon", "push_notification", "email", "no_action"],
+            n,
+        ),
+        "clv_predicted": np.random.lognormal(11, 1, n),
+        "days_since_last_purchase": np.random.exponential(15, n),
+        "days_since_last_login": np.random.exponential(8, n),
+    })
+
+
+@pytest.fixture
+def sample_model_metrics() -> dict:
+    """Sample model performance metrics for dashboard display tests."""
+    return {
+        "ml_model": {
+            "auc": 0.82, "precision": 0.76, "recall": 0.70,
+            "f1_score": 0.73, "accuracy": 0.81,
+        },
+        "dl_model": {
+            "auc": 0.79, "precision": 0.72, "recall": 0.67,
+            "f1_score": 0.69, "accuracy": 0.78,
+        },
+        "ensemble": {
+            "auc": 0.84, "precision": 0.78, "recall": 0.72,
+            "f1_score": 0.75, "accuracy": 0.83,
+        },
+    }
+
+
+@pytest.fixture
+def sample_ab_test_results() -> dict:
+    """Sample A/B test results for dashboard display tests."""
+    return {
+        "experiment_name": "retention_coupon_campaign",
+        "treatment_size": 500,
+        "control_size": 500,
+        "treatment_churn_rate": 0.12,
+        "control_churn_rate": 0.20,
+        "lift": 0.40,
+        "p_value": 0.003,
+        "is_significant": True,
+        "confidence_interval": (0.03, 0.13),
+    }
+
+
+@pytest.fixture
+def sample_budget_results() -> pd.DataFrame:
+    """Sample budget optimization results for dashboard display tests."""
+    return pd.DataFrame({
+        "segment": ["vip_loyal", "regular_loyal", "bargain_hunter",
+                     "new_customer", "dormant", "high_value_at_risk"],
+        "allocated_budget_krw": [5_000_000, 12_000_000, 8_000_000,
+                                  10_000_000, 3_000_000, 12_000_000],
+        "expected_retained_customers": [50, 120, 80, 100, 30, 60],
+        "expected_roi": [2.5, 1.8, 1.5, 2.0, 0.8, 3.0],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Dashboard data loader fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def dashboard_data_loader(config):
+    """Create a DashboardDataLoader instance for dashboard tests."""
+    try:
+        from src.dashboard.data_loader import DashboardDataLoader
+        return DashboardDataLoader(config)
+    except ImportError:
+        return MagicMock()
+
+
+# ---------------------------------------------------------------------------
+# Docker file content fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def dockerfile_mlflow() -> str:
+    """Read Dockerfile.mlflow contents."""
+    path = PROJECT_ROOT / "Dockerfile.mlflow"
+    return path.read_text() if path.exists() else ""
+
+
+@pytest.fixture
+def dockerfile_pipeline() -> str:
+    """Read Dockerfile.pipeline contents."""
+    path = PROJECT_ROOT / "Dockerfile.pipeline"
+    return path.read_text() if path.exists() else ""
+
+
+@pytest.fixture
+def dockerfile_dashboard() -> str:
+    """Read Dockerfile.dashboard contents."""
+    path = PROJECT_ROOT / "Dockerfile.dashboard"
+    return path.read_text() if path.exists() else ""
+
+
+# ---------------------------------------------------------------------------
+# CLI fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sample_config() -> dict:
+    """Minimal valid config dict for CLI / pipeline tests."""
+    return {
+        "simulation": {
+            "random_seed": 42,
+            "num_customers": 100,
+            "simulation_months": 6,
+            "simulation_days": 180,
+            "start_date": "2024-01-01",
+            "small_mode": {
+                "num_customers": 50,
+                "simulation_months": 3,
+                "simulation_days": 90,
+            },
+        },
+        "churn_definition": {
+            "no_purchase_days": 30,
+            "no_login_days": 60,
+            "operator": "OR",
+        },
+        "pipeline": {
+            "train_months": 4,
+            "test_months": 2,
+            "ensemble_weight_ml": 0.6,
+            "ensemble_weight_dl": 0.4,
+        },
+        "segmentation": {"method": "rfm_behavioral", "n_rfm_bins": 5},
+        "optimization": {
+            "total_budget": 50_000_000,
+            "channels": {"email": {"cost_per_action": 1000}},
+        },
+        "monitoring": {"enabled": True},
+        "treatment": {"treatment_ratio": 0.5},
+        "budget": {"total_krw": 50_000_000, "currency": "KRW"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cohort analyzer fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def cohort_analyzer():
+    """Create a CohortAnalyzer instance with default config."""
+    try:
+        from src.analysis.cohort_analysis import CohortAnalyzer
+        return CohortAnalyzer()
+    except ImportError:
+        return MagicMock()
