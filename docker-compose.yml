@@ -1,0 +1,200 @@
+# =============================================================================
+# Docker Compose Configuration
+# E-Commerce Customer Churn Prediction & Retention Optimization System
+# =============================================================================
+# Services:
+#   - pipeline:   Main ML/DL training and inference pipeline
+#   - dashboard:  Streamlit dashboard (localhost:8501)
+#   - redis:      Redis for real-time scoring and caching
+#   - mlflow:     MLflow tracking server (localhost:5000)
+#
+# Quick Start:
+#   docker compose up                          # Run everything
+#   docker compose up dashboard                # Dashboard + dependencies
+#   docker compose up pipeline                 # Pipeline + dependencies
+#
+# Pipeline modes (via PIPELINE_MODE env var):
+#   simulate, train, uplift, clv, optimize, ab_test, survival,
+#   recommend, cohort, segment, monitor, features, dashboard, all
+#
+# Examples:
+#   PIPELINE_MODE=train docker compose up pipeline
+#   SMALL=true docker compose up
+#   SKIP_PIPELINE=true docker compose up dashboard
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # MLflow Tracking Server
+  # ---------------------------------------------------------------------------
+  # Uses local SQLite backend and filesystem artifact store.
+  # No PostgreSQL required.
+  # ---------------------------------------------------------------------------
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    container_name: churn-mlflow
+    ports:
+      - "${MLFLOW_PORT:-5001}:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:////mlflow/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/mlflow/artifacts
+      - MLFLOW_HOST=0.0.0.0
+      - MLFLOW_PORT=5000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - churn-network
+
+  # ---------------------------------------------------------------------------
+  # Redis (Streaming & Caching)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: churn-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - churn-network
+
+  # ---------------------------------------------------------------------------
+  # ML/DL Pipeline
+  # ---------------------------------------------------------------------------
+  # Runs the churn prediction pipeline. Supports all modes:
+  #   simulate, train, uplift, clv, optimize, ab_test, survival,
+  #   recommend, cohort, segment, monitor, features, all
+  #
+  # Configuration via environment variables:
+  #   PIPELINE_MODE - which mode to run (default: all)
+  #   SMALL         - "true" for reduced dataset (default: false)
+  #   BUDGET        - budget cap for optimize mode
+  #   VERBOSE       - "true" for verbose logging
+  # ---------------------------------------------------------------------------
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.pipeline
+    container_name: churn-pipeline
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./models:/app/models
+      - ./results:/app/results
+      - mlflow-data:/mlflow
+      - pipeline-output:/app/output
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONPATH=/app
+      - PIPELINE_MODE=${PIPELINE_MODE:-all}
+      - SMALL=${SMALL:-true}
+      - BUDGET=${BUDGET:-}
+      - VERBOSE=${VERBOSE:-false}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - churn-network
+
+  # ---------------------------------------------------------------------------
+  # Streamlit Dashboard
+  # ---------------------------------------------------------------------------
+  # The dashboard waits for the pipeline container to finish before launching.
+  # Set SKIP_PIPELINE=true to skip waiting for pipeline completion.
+  #
+  # Views available:
+  #   - Churn prediction overview
+  #   - Uplift modeling / 4-quadrant segmentation
+  #   - CLV analysis
+  #   - A/B test results
+  #   - Survival curves
+  #   - Cohort retention
+  #   - Budget optimization
+  #   - Recommendations
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: churn-dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./models:/app/models
+      - ./results:/app/results
+      - mlflow-data:/mlflow
+      - pipeline-output:/app/output
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONPATH=/app
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      # Set SKIP_PIPELINE=true to skip pipeline and launch dashboard directly
+      - SKIP_PIPELINE=${SKIP_PIPELINE:-false}
+      - PIPELINE_MAX_RETRIES=${PIPELINE_MAX_RETRIES:-1}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pipeline:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    command: ["streamlit", "run", "src/dashboard/app.py",
+              "--server.port=8501",
+              "--server.address=0.0.0.0",
+              "--server.headless=true"]
+    networks:
+      - churn-network
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  mlflow-data:
+    driver: local
+  redis-data:
+    driver: local
+  pipeline-output:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  churn-network:
+    driver: bridge

@@ -1,0 +1,347 @@
+"""
+SHAP Explainer for Churn Prediction Models.
+
+Provides model-agnostic SHAP-based explanations for trained churn models:
+- Global feature importance via mean absolute SHAP values
+- Individual prediction explanations (local interpretability)
+- Summary plots (beeswarm), bar plots, force plots, dependence plots
+- DataFrame export of SHAP values for downstream analysis
+
+Supports both XGBoost and LightGBM backends via shap.TreeExplainer.
+All plot methods save to file (non-interactive) for pipeline integration.
+"""
+
+import logging
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend for headless environments
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import shap
+
+logger = logging.getLogger(__name__)
+
+
+class ShapExplainer:
+    """SHAP-based model explainer for churn prediction models.
+
+    Uses shap.TreeExplainer for gradient boosting models (XGBoost/LightGBM)
+    to compute SHAP values efficiently. Provides global and local
+    interpretability methods, plus plot generation utilities.
+
+    Args:
+        model: A trained MLChurnModel instance (with .model and .model_type).
+        background_data: Training data DataFrame used as background for
+            SHAP value computation.
+        config: Configuration dictionary (for optional settings).
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        background_data: pd.DataFrame,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Initialize SHAP explainer with a trained model and background data.
+
+        Args:
+            model: Trained MLChurnModel with .model and .model_type attributes.
+            background_data: Training data used as reference distribution.
+            config: Optional configuration dictionary.
+        """
+        self.ml_model = model
+        self.config = config or {}
+        self.background_data = background_data
+        self.feature_names = list(background_data.columns)
+
+        # Build the SHAP TreeExplainer from the underlying model
+        self._explainer = self._create_explainer(model)
+        self._shap_values_cache: Optional[np.ndarray] = None
+        self._cache_key: Optional[int] = None
+
+    def _create_explainer(self, model: Any) -> shap.TreeExplainer:
+        """Create a SHAP TreeExplainer from the ML model.
+
+        Extracts the underlying XGBoost or LightGBM model object
+        and wraps it in a shap.TreeExplainer.
+
+        Args:
+            model: Trained MLChurnModel instance.
+
+        Returns:
+            shap.TreeExplainer instance.
+        """
+        raw_model = model.model
+        logger.info(
+            f"Creating SHAP TreeExplainer for {model.model_type} model"
+        )
+        return shap.TreeExplainer(raw_model)
+
+    def compute_shap_values(self, X: pd.DataFrame) -> np.ndarray:
+        """Compute SHAP values for the given data.
+
+        Uses caching to avoid recomputation when called with the same data.
+
+        Args:
+            X: Feature DataFrame of shape (n_samples, n_features).
+
+        Returns:
+            numpy array of SHAP values with shape (n_samples, n_features).
+        """
+        cache_key = id(X)
+        if self._shap_values_cache is not None and self._cache_key == cache_key:
+            return self._shap_values_cache
+
+        shap_values = self._explainer.shap_values(X)
+
+        # Handle different SHAP output formats
+        # For binary classifiers, shap_values may be a list of 2 arrays
+        # (one per class). We want the positive class (churn=1).
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1]
+
+        shap_values = np.array(shap_values)
+
+        self._shap_values_cache = shap_values
+        self._cache_key = cache_key
+
+        logger.info(
+            f"Computed SHAP values: shape={shap_values.shape}"
+        )
+        return shap_values
+
+    def global_feature_importance(
+        self, X: pd.DataFrame
+    ) -> Dict[str, float]:
+        """Compute global feature importance as mean |SHAP| values.
+
+        Returns features sorted by importance in descending order.
+
+        Args:
+            X: Feature DataFrame to compute SHAP values over.
+
+        Returns:
+            OrderedDict mapping feature name to mean absolute SHAP value,
+            sorted descending by importance.
+        """
+        shap_values = self.compute_shap_values(X)
+        mean_abs_shap = np.abs(shap_values).mean(axis=0)
+
+        # Sort descending by importance
+        sorted_indices = np.argsort(-mean_abs_shap)
+        importance = OrderedDict()
+        for idx in sorted_indices:
+            importance[self.feature_names[idx]] = float(mean_abs_shap[idx])
+
+        return importance
+
+    def get_top_features(
+        self, X: pd.DataFrame, k: int = 10
+    ) -> List[Tuple[str, float]]:
+        """Get the top-k most important features.
+
+        Args:
+            X: Feature DataFrame for SHAP computation.
+            k: Number of top features to return.
+
+        Returns:
+            List of (feature_name, importance) tuples, sorted descending.
+        """
+        importance = self.global_feature_importance(X)
+        return list(importance.items())[:k]
+
+    def explain_individual(
+        self, sample: pd.Series
+    ) -> Dict[str, float]:
+        """Explain a single prediction using SHAP values.
+
+        Returns per-feature SHAP contributions and the base value
+        (expected model output over the background data).
+
+        Args:
+            sample: A single-row pd.Series with feature values.
+
+        Returns:
+            Dict with feature names as keys and SHAP values as values,
+            plus a 'base_value' key with the expected base prediction.
+        """
+        sample_df = pd.DataFrame([sample])
+        shap_values = self.compute_shap_values(sample_df)
+        # Invalidate cache since this was a single-sample computation
+        self._shap_values_cache = None
+        self._cache_key = None
+
+        explanation = {}
+        for i, feat in enumerate(self.feature_names):
+            explanation[feat] = float(shap_values[0, i])
+
+        # Get base value (expected value)
+        base_value = self._explainer.expected_value
+        if isinstance(base_value, (list, np.ndarray)):
+            base_value = base_value[1] if len(base_value) > 1 else base_value[0]
+        explanation["base_value"] = float(base_value)
+
+        return explanation
+
+    def get_explanation_dataframe(
+        self, X: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Return SHAP values as a DataFrame with feature column names.
+
+        Args:
+            X: Feature DataFrame.
+
+        Returns:
+            DataFrame of SHAP values with same shape and columns as X.
+        """
+        shap_values = self.compute_shap_values(X)
+        return pd.DataFrame(shap_values, columns=self.feature_names, index=X.index)
+
+    # ------------------------------------------------------------------
+    # Plot methods (all save to file, non-interactive)
+    # ------------------------------------------------------------------
+
+    def save_summary_plot(
+        self,
+        X: pd.DataFrame,
+        output_path: str,
+        max_display: int = 20,
+    ) -> None:
+        """Generate and save a SHAP summary (beeswarm) plot.
+
+        Shows the distribution of SHAP values across all samples
+        for the top features.
+
+        Args:
+            X: Feature DataFrame.
+            output_path: File path for the saved PNG.
+            max_display: Maximum number of features to display.
+        """
+        shap_values = self.compute_shap_values(X)
+
+        plt.figure(figsize=(12, 8))
+        shap.summary_plot(
+            shap_values,
+            X,
+            feature_names=self.feature_names,
+            max_display=max_display,
+            show=False,
+        )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        logger.info(f"Saved SHAP summary plot to {output_path}")
+
+    def save_force_plot(
+        self,
+        sample: pd.Series,
+        output_path: str,
+    ) -> None:
+        """Generate and save a SHAP force plot for an individual prediction.
+
+        Shows how each feature contributes to pushing the prediction
+        away from the base value.
+
+        Args:
+            sample: Single sample (pd.Series) to explain.
+            output_path: File path for the saved image.
+        """
+        sample_df = pd.DataFrame([sample])
+        shap_values = self.compute_shap_values(sample_df)
+        # Clear cache after single-sample computation
+        self._shap_values_cache = None
+        self._cache_key = None
+
+        base_value = self._explainer.expected_value
+        if isinstance(base_value, (list, np.ndarray)):
+            base_value = base_value[1] if len(base_value) > 1 else base_value[0]
+
+        # Use waterfall plot as a matplotlib-native alternative to force plot
+        # which requires JS rendering
+        explanation = shap.Explanation(
+            values=shap_values[0],
+            base_values=base_value,
+            data=sample.values,
+            feature_names=self.feature_names,
+        )
+
+        plt.figure(figsize=(14, 6))
+        shap.plots.waterfall(explanation, show=False, max_display=15)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        logger.info(f"Saved SHAP force/waterfall plot to {output_path}")
+
+    def save_dependence_plot(
+        self,
+        X: pd.DataFrame,
+        feature_name: str,
+        output_path: str,
+        interaction_feature: Optional[str] = None,
+    ) -> None:
+        """Generate and save a SHAP dependence plot for a feature.
+
+        Shows how the SHAP value of a feature varies with its value,
+        optionally colored by an interaction feature.
+
+        Args:
+            X: Feature DataFrame.
+            feature_name: Name of the feature to plot.
+            output_path: File path for the saved PNG.
+            interaction_feature: Optional feature for interaction coloring.
+        """
+        shap_values = self.compute_shap_values(X)
+
+        plt.figure(figsize=(10, 6))
+        shap.dependence_plot(
+            feature_name,
+            shap_values,
+            X,
+            feature_names=self.feature_names,
+            interaction_index=interaction_feature,
+            show=False,
+        )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        logger.info(
+            f"Saved SHAP dependence plot for '{feature_name}' to {output_path}"
+        )
+
+    def save_bar_plot(
+        self,
+        X: pd.DataFrame,
+        output_path: str,
+        max_display: int = 20,
+    ) -> None:
+        """Generate and save a SHAP global importance bar chart.
+
+        Shows mean |SHAP| values as horizontal bars.
+
+        Args:
+            X: Feature DataFrame.
+            output_path: File path for the saved PNG.
+            max_display: Maximum number of features to display.
+        """
+        shap_values = self.compute_shap_values(X)
+
+        plt.figure(figsize=(10, 8))
+        shap.summary_plot(
+            shap_values,
+            X,
+            feature_names=self.feature_names,
+            plot_type="bar",
+            max_display=max_display,
+            show=False,
+        )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        logger.info(f"Saved SHAP bar plot to {output_path}")
