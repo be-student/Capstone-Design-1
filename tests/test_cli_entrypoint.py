@@ -69,6 +69,49 @@ def config_file(sample_config, tmp_path):
     return str(cfg_path)
 
 
+def _cohort_test_frames(num_customers: int = 12):
+    """Return valid cohort/journey inputs for strict cohort mode tests."""
+    customers = pd.DataFrame({
+        "customer_id": [f"C{i}" for i in range(num_customers)],
+        "signup_date": pd.Timestamp("2024-01-01"),
+        "churn_label": [1 if i < 6 else 0 for i in range(num_customers)],
+    })
+    churn_events = [
+        "cs_contact",
+        "coupon_use",
+        "review",
+        "search",
+        "add_to_cart",
+        "remove_from_cart",
+    ]
+    rows = []
+    for i, customer_id in enumerate(customers["customer_id"]):
+        rows.extend([
+            {
+                "customer_id": customer_id,
+                "event_date": pd.Timestamp("2024-01-01"),
+                "event_type": "purchase",
+                "amount": 1000.0 + i,
+                "revenue": 1000.0 + i,
+            },
+            {
+                "customer_id": customer_id,
+                "event_date": pd.Timestamp("2024-02-01"),
+                "event_type": "purchase",
+                "amount": 1200.0 + i,
+                "revenue": 1200.0 + i,
+            },
+            {
+                "customer_id": customer_id,
+                "event_date": pd.Timestamp("2024-03-01"),
+                "event_type": churn_events[i] if i < 6 else "page_view",
+                "amount": 0.0,
+                "revenue": 0.0,
+            },
+        ])
+    return customers, pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------
 # MODES registry tests
 # ---------------------------------------------------------------------------
@@ -153,8 +196,8 @@ class TestBuildParserExtended:
         assert args.cohort_type == "behavioral"
 
     def test_learner_choices(self):
-        """--learner should accept t_learner and s_learner."""
-        for learner in ["t_learner", "s_learner"]:
+        """--learner should accept auto, t_learner, and s_learner."""
+        for learner in ["auto", "t_learner", "s_learner"]:
             args = build_parser(["--mode", "uplift", "--learner", learner])
             assert args.learner == learner
 
@@ -308,13 +351,9 @@ class TestModeHandlerReturnStructure:
     def test_cohort_handler_returns_cohort_type(self, sample_config):
         """Cohort handler should include cohort_type in result."""
         args = build_parser(["--mode", "cohort", "--cohort-type", "weekly"])
-        # Cohort handler needs data files, so mock _load_events
-        with patch("src.main._load_events") as mock_events:
-            mock_events.return_value = pd.DataFrame({
-                "customer_id": [f"C{i}" for i in range(20)] * 3,
-                "event_date": pd.date_range("2024-01-01", periods=60, freq="D"),
-                "revenue": np.random.uniform(100, 1000, 60),
-            })
+        customers, events = _cohort_test_frames()
+        with patch("src.main._load_events", return_value=events), \
+             patch("src.main._load_customers", return_value=customers):
             result = MODES["cohort"](sample_config, args)
         assert result["mode"] == "cohort"
         assert result["cohort_type"] == "weekly"
@@ -352,28 +391,17 @@ class TestMainIntegrationExtended:
 
     def test_main_returns_dict(self, config_file):
         """main() should always return a dict."""
-        # Use a mode that doesn't require data files
-        with patch("src.main._load_events") as mock_ev, \
-             patch("src.main._load_customers") as mock_cust:
-            mock_cust.return_value = pd.DataFrame({
-                "customer_id": [f"C{i}" for i in range(10)],
-                "churn_label": np.random.randint(0, 2, 10),
-            })
-            mock_ev.return_value = pd.DataFrame({
-                "customer_id": [f"C{i}" for i in range(10)],
-                "event_date": pd.date_range("2024-01-01", periods=10),
-            })
+        customers, events = _cohort_test_frames()
+        with patch("src.main._load_events", return_value=events), \
+             patch("src.main._load_customers", return_value=customers):
             result = main(["--mode", "cohort", "--config", config_file, "--quiet"])
         assert isinstance(result, dict)
 
     def test_main_quiet_suppresses_output(self, config_file, capsys):
         """main() with --quiet should not print JSON."""
-        with patch("src.main._load_events") as mock_ev:
-            mock_ev.return_value = pd.DataFrame({
-                "customer_id": [f"C{i}" for i in range(10)] * 3,
-                "event_date": pd.date_range("2024-01-01", periods=30, freq="D"),
-                "revenue": np.random.uniform(100, 1000, 30),
-            })
+        customers, events = _cohort_test_frames()
+        with patch("src.main._load_events", return_value=events), \
+             patch("src.main._load_customers", return_value=customers):
             main(["--mode", "cohort", "--config", config_file, "--quiet"])
         captured = capsys.readouterr()
         assert captured.out == ""

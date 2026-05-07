@@ -397,7 +397,7 @@ class PipelineRunner:
             output=None,
             budget=None,
             small=False,
-            learner="t_learner",
+            learner="auto",
             cohort_type="monthly",
             verbose=False,
             quiet=False,

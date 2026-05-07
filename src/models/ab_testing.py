@@ -631,15 +631,38 @@ class ABTestFramework:
 
         statistically_significant = bool(result.get("is_significant", False))
         beneficial_significant = statistically_significant and treatment_rate < control_rate
+        power_payload = result.get("power_analysis", {}) or {}
+        design_power = float(
+            power_payload.get("target_power", power_payload.get("design_power", 0.80))
+        )
+        required_sample_size = power_payload.get("required_sample_size")
+        if required_sample_size is None:
+            required_sample_size = self.power_analysis.required_sample_size(
+                baseline_rate=control_rate if 0 < control_rate < 1 else 0.5,
+                mde=max(abs(absolute_effect), 0.01),
+                alpha=float(result.get("alpha", 0.05)),
+                power=design_power,
+            )
+        required_sample_size = int(required_sample_size)
+        observed_group_n = max(
+            min(int(result.get("treatment_size", 0)), int(result.get("control_size", 0))),
+            1,
+        )
         derived_power = (
             power
             if power is not None
             else float(result.get("power", self.power_analysis.compute_power(
-                n=max(int(result.get("treatment_size", 0)), 1),
+                n=observed_group_n,
                 baseline_rate=control_rate if 0 < control_rate < 1 else 0.5,
                 mde=max(abs(absolute_effect), 1e-6),
                 alpha=float(result.get("alpha", 0.05)),
             )))
+        )
+        observed_power = float(np.clip(derived_power, 0.0, 1.0))
+        is_underpowered = (
+            observed_power < design_power
+            or int(result.get("treatment_size", 0)) < required_sample_size
+            or int(result.get("control_size", 0)) < required_sample_size
         )
 
         return {
@@ -653,7 +676,12 @@ class ABTestFramework:
             "is_significant": beneficial_significant,
             "confidence_interval": [float(ci[0]), float(ci[1])],
             "effect_size_cohens_h": float(abs(effect_size)),
-            "power": float(np.clip(derived_power, 0.0, 1.0)),
+            "power": observed_power,
+            "observed_power": observed_power,
+            "design_power": design_power,
+            "required_sample_size_per_group": required_sample_size,
+            "required_total_sample_size": required_sample_size * 2,
+            "is_underpowered": bool(is_underpowered),
             "alpha": float(result.get("alpha", 0.05)),
             "absolute_effect": absolute_effect,
             "test_type": result.get("test_used", result.get("test_type", "unknown")),

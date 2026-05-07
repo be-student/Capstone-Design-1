@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -58,6 +59,8 @@ REQUIRED_PIPELINE_ARTIFACTS = [
     "model_metrics.json",
     "model_performance_history.csv",
     "shap_summary.png",
+    "shap_local_explanations.csv",
+    "shap_local_waterfall.png",
     "feature_importance.csv",
     "churn_predictions.csv",
     "uplift_results.csv",
@@ -67,11 +70,13 @@ REQUIRED_PIPELINE_ARTIFACTS = [
     "clv_validation.json",
     "segments_6plus.csv",
     "segment_summary.csv",
+    "segment_validation.json",
     "budget_optimization.csv",
     "budget_results.csv",
     "budget_whatif.csv",
     "ab_test_results.json",
     "ab_test_detailed.json",
+    "cohort_analysis.json",
     "cohort_retention_matrix.csv",
     "cohort_milestones.csv",
     "cohort_churn_rates.csv",
@@ -169,6 +174,56 @@ def _publish_artifact(
     shutil.copy2(source, dest_dir / (artifact_name or source.name))
 
 
+def _file_sha256(path: Path) -> Optional[str]:
+    """Return a stable hash for artifact freshness checks."""
+    if not path.exists() or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_generation_summary(data_dir: Path) -> Dict[str, Any]:
+    """Validate simulator output against full submission data requirements."""
+    path = data_dir / "generation_summary.json"
+    if not path.exists():
+        return {"valid": False, "reason": "missing_generation_summary"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        validation = payload.get("validation", {}) or {}
+        group_check = validation.get("group_size_check", {}) or {}
+        churn_check = validation.get("target_churn_check", {}) or {}
+        mode = payload.get("generation_mode", validation.get("mode", "unknown"))
+        num_customers = int(payload.get("num_customers", 0))
+        treatment_count = int(payload.get("treatment_count", 0))
+        control_count = int(payload.get("control_count", 0))
+        churn_rate = float(payload.get("churn_rate", 0.0))
+        valid = (
+            mode != "small"
+            and num_customers >= 20_000
+            and treatment_count >= 10_000
+            and control_count >= 10_000
+            and 0.15 <= churn_rate <= 0.25
+            and bool(group_check.get("passed", False))
+            and bool(churn_check.get("passed", 0.15 <= churn_rate <= 0.25))
+        )
+        return {
+            "valid": valid,
+            "mode": mode,
+            "num_customers": num_customers,
+            "treatment_count": treatment_count,
+            "control_count": control_count,
+            "churn_rate": churn_rate,
+            "group_size_passed": bool(group_check.get("passed", False)),
+            "target_churn_passed": bool(churn_check.get("passed", 0.15 <= churn_rate <= 0.25)),
+            "reason": "ok" if valid else "full_mode_generation_required",
+        }
+    except Exception as exc:
+        return {"valid": False, "reason": f"validation_error: {exc}"}
+
+
 def _save_result_and_artifact(
     data: Any,
     results_path: Path,
@@ -186,30 +241,47 @@ def _save_result_and_artifact(
 def _write_artifact_checklist(
     config: Dict[str, Any],
     results_dir: Path,
+    data_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Record whether every required submission artifact exists."""
     artifact_dir = _dashboard_artifacts_dir(config)
+    data_dir = data_dir or DEFAULT_DATA_DIR
     rows = []
     for name in REQUIRED_PIPELINE_ARTIFACTS:
         results_path = results_dir / name
         artifact_path = artifact_dir / name
-        validation = _validate_required_artifact(name, results_path)
+        validation = _validate_required_artifact(name, results_path, data_dir=data_dir)
         if results_path.exists():
             _publish_artifact(config, results_path)
+        results_hash = _file_sha256(results_path)
+        artifact_hash = _file_sha256(artifact_path)
+        mirror_valid = (
+            results_hash is not None
+            and artifact_hash is not None
+            and results_hash == artifact_hash
+        )
         rows.append({
             "artifact": name,
             "results_path": str(results_path),
             "results_exists": results_path.exists(),
             "dashboard_artifact_path": str(artifact_path),
             "dashboard_artifact_exists": artifact_path.exists(),
+            "results_sha256": results_hash,
+            "dashboard_artifact_sha256": artifact_hash,
+            "mirror_hash_match": mirror_valid,
             "validation": validation,
-            "satisfied": results_path.exists() and validation["valid"],
+            "satisfied": results_path.exists() and validation["valid"] and mirror_valid,
         })
 
+    generation_summary = _validate_generation_summary(data_dir)
     checklist = {
         "required_count": len(rows),
         "satisfied_count": sum(1 for row in rows if row["satisfied"]),
         "missing": [row["artifact"] for row in rows if not row["satisfied"]],
+        "generation_summary_validation": generation_summary,
+        "full_submission_ready": generation_summary["valid"] and all(
+            row["satisfied"] for row in rows
+        ),
         "artifacts": rows,
     }
     _save_result_and_artifact(
@@ -220,7 +292,11 @@ def _write_artifact_checklist(
     return checklist
 
 
-def _validate_required_artifact(name: str, path: Path) -> Dict[str, Any]:
+def _validate_required_artifact(
+    name: str,
+    path: Path,
+    data_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Validate required artifacts beyond simple file existence."""
     if not path.exists():
         return {"valid": False, "reason": "missing"}
@@ -229,6 +305,28 @@ def _validate_required_artifact(name: str, path: Path) -> Dict[str, Any]:
             df = pd.read_csv(path)
             if df.empty:
                 return {"valid": False, "reason": "empty_csv"}
+            if name == "churn_predictions.csv":
+                required = {"customer_id", "churn_probability", "risk_level", "segment"}
+                missing = required - set(df.columns)
+                if missing:
+                    return {
+                        "valid": False,
+                        "reason": "missing_churn_prediction_columns",
+                        "missing_columns": sorted(missing),
+                    }
+                customers_dir = data_dir or DEFAULT_DATA_DIR
+                customers_path = customers_dir / "customers.csv"
+                if customers_path.exists():
+                    expected_rows = len(pd.read_csv(customers_path, usecols=["customer_id"]))
+                    if len(df) != expected_rows:
+                        return {
+                            "valid": False,
+                            "reason": "not_all_customers_covered",
+                            "expected_rows": int(expected_rows),
+                            "actual_rows": int(len(df)),
+                        }
+                if df["customer_id"].astype(str).duplicated().any():
+                    return {"valid": False, "reason": "duplicate_customer_predictions"}
             if name == "cohort_retention_matrix.csv" and df.shape[1] < 3:
                 return {"valid": False, "reason": "needs_multiple_periods"}
             if name == "cohort_milestones.csv":
@@ -263,15 +361,103 @@ def _validate_required_artifact(name: str, path: Path) -> Dict[str, Any]:
                 active = df["recommendation_type"].astype(str).ne("no_action")
                 if (no_action_mask & active).any():
                     return {"valid": False, "reason": "active_action_for_no_action_customer"}
+            if name == "segments_6plus.csv":
+                required = {
+                    "customer_id", "segment", "churn_probability",
+                    "uplift_score", "clv", "priority_score",
+                }
+                missing = required - set(df.columns)
+                if missing:
+                    return {
+                        "valid": False,
+                        "reason": "missing_segment_columns",
+                        "missing_columns": sorted(missing),
+                    }
+                if df["segment"].nunique() < 6:
+                    return {"valid": False, "reason": "needs_at_least_6_segments"}
+            if name == "segment_summary.csv" and len(df) < 6:
+                return {"valid": False, "reason": "needs_at_least_6_segment_rows"}
+            if name == "shap_local_explanations.csv":
+                required = {"feature", "shap_value", "feature_value", "abs_shap_value"}
+                missing = required - set(df.columns)
+                if missing:
+                    return {
+                        "valid": False,
+                        "reason": "missing_local_shap_columns",
+                        "missing_columns": sorted(missing),
+                    }
+            if name == "pre_churn_events.csv":
+                required = {"event_type", "churned_freq", "active_freq", "freq_ratio"}
+                missing = required - set(df.columns)
+                if missing:
+                    return {
+                        "valid": False,
+                        "reason": "missing_pre_churn_columns",
+                        "missing_columns": sorted(missing),
+                    }
         elif path.suffix == ".json":
             payload = json.loads(path.read_text(encoding="utf-8"))
             if name == "churn_last30_sequences.json" and len(payload) < 5:
                 return {"valid": False, "reason": "needs_top5_sequences"}
+            if name == "cohort_analysis.json":
+                errors = payload.get("errors", [])
+                error_keys = [key for key in payload if key.endswith("_error")]
+                if payload.get("status") == "failed" or errors or error_keys:
+                    return {
+                        "valid": False,
+                        "reason": "cohort_errors_present",
+                        "errors": errors + error_keys,
+                    }
+                if payload.get("retention_matrix_shape", [0, 0])[1] < 2:
+                    return {"valid": False, "reason": "retention_has_one_period"}
+                required_flags = [
+                    "churn_sequences_saved",
+                    "pre_churn_events_saved",
+                    "journey_funnel_saved",
+                ]
+                missing_flags = [flag for flag in required_flags if not payload.get(flag)]
+                if missing_flags:
+                    return {
+                        "valid": False,
+                        "reason": "missing_required_cohort_outputs",
+                        "missing_flags": missing_flags,
+                    }
+            if name == "clv_validation.json":
+                if payload.get("target") == "monetary_12m_proxy":
+                    return {"valid": False, "reason": "proxy_target_not_actual_future_revenue"}
+                if payload.get("label_window_days", 0) <= 0:
+                    return {"valid": False, "reason": "missing_future_label_window"}
+            if name == "ab_test_detailed.json":
+                experiments = payload.get("experiments", [])
+                required = {
+                    "required_sample_size_per_group",
+                    "required_total_sample_size",
+                    "observed_power",
+                    "design_power",
+                    "is_underpowered",
+                }
+                for exp in experiments:
+                    missing = required - set(exp)
+                    if missing:
+                        return {
+                            "valid": False,
+                            "reason": "missing_ab_power_fields",
+                            "missing_columns": sorted(missing),
+                        }
+            if name == "segment_validation.json":
+                if not (
+                    payload.get("high_value_persuadable_count", 0) > 0
+                    or payload.get("high_value_lost_cause_count", 0) > 0
+                    or payload.get("absence_reason")
+                ):
+                    return {"valid": False, "reason": "missing_high_value_segment_evidence"}
             if name == "monitoring_report.json":
                 psi = payload.get("psi_report", {})
                 ks = payload.get("ks_report", {})
                 if not psi.get("feature_alerts") or not ks.get("feature_alerts"):
                     return {"valid": False, "reason": "missing_psi_or_ks_alerts"}
+            if name == "journey_funnel.json" and not payload:
+                return {"valid": False, "reason": "empty_journey_funnel"}
         return {"valid": True}
     except Exception as exc:
         return {"valid": False, "reason": f"validation_error: {exc}"}
@@ -427,7 +613,7 @@ def _budget_metrics(allocation: pd.DataFrame, data: pd.DataFrame) -> pd.DataFram
 def _apply_retention_no_action_policy(scored: pd.DataFrame) -> pd.DataFrame:
     """Remove retention spend from negative-uplift/no-action customers."""
     adjusted = scored.copy()
-    no_action = adjusted["uplift_score"].astype(float) < 0
+    no_action = adjusted["uplift_score"].astype(float) <= 0
     if "segment" in adjusted.columns:
         no_action = no_action | adjusted["segment"].astype(str).str.contains(
             "sleeping_dog", case=False, na=False
@@ -755,11 +941,49 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
     results["ensemble"] = _metric_aliases(ens_m)
     logger.info("Ensemble AUC-ROC: %.4f", ens_m.get("auc_roc", 0))
 
-    # Customer-level predictions
-    pred_frame = _churn_prediction_frame(ensemble_ids, ens_probs, customers)
+    # Customer-level predictions cover the full customer base for the
+    # dashboard, while test-set ensemble probabilities are preserved where
+    # they are available.
+    all_ids = (
+        features["customer_id"].values
+        if "customer_id" in features.columns
+        else np.arange(len(features))
+    )
+    all_probs = _safe_predict_proba(ml, features[fcols])
+    pred_frame = _churn_prediction_frame(all_ids, all_probs, customers)
+    pred_frame["split"] = "train"
+    pred_frame["prediction_source"] = "ml_full_customer_scoring"
+    pred_frame["_customer_id_str"] = pred_frame["customer_id"].astype(str)
+    test_lookup = pd.Series(
+        np.asarray(test_ids).astype(str),
+        index=np.asarray(test_ids).astype(str),
+    )
+    test_id_set = set(test_lookup.index)
+    pred_frame.loc[
+        pred_frame["_customer_id_str"].isin(test_id_set), "split"
+    ] = "test"
+    ensemble_lookup = pd.Series(
+        np.asarray(ens_probs, dtype=float),
+        index=pd.Index(np.asarray(ensemble_ids).astype(str)),
+    )
+    overlay = pred_frame["_customer_id_str"].map(ensemble_lookup)
+    overlay_mask = overlay.notna()
+    pred_frame.loc[overlay_mask, "churn_probability"] = overlay[overlay_mask].astype(float)
+    pred_frame.loc[overlay_mask, "prediction_source"] = "ensemble_test_scoring"
+    pred_frame["churn_probability"] = pred_frame["churn_probability"].clip(0.0, 1.0)
+    pred_frame["risk_level"] = _risk_level(pred_frame["churn_probability"])
+    pred_frame = pred_frame.drop(columns=["_customer_id_str"])
     _save_result_and_artifact(
         pred_frame,
         results_dir / "churn_predictions.csv",
+        config,
+    )
+    test_pred_frame = _churn_prediction_frame(ensemble_ids, ens_probs, customers)
+    test_pred_frame["split"] = "test"
+    test_pred_frame["prediction_source"] = "ensemble_test_scoring"
+    _save_result_and_artifact(
+        test_pred_frame,
+        results_dir / "churn_predictions_test.csv",
         config,
     )
 
@@ -793,6 +1017,36 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
             results_dir / "feature_importance.csv",
             config,
         )
+        local_probs = _safe_predict_proba(ml, shap_sample)
+        local_pos = int(np.argmax(local_probs))
+        local_sample = shap_sample.iloc[local_pos]
+        local_customer_id = None
+        if "customer_id" in features.columns:
+            local_index = shap_sample.index[local_pos]
+            if local_index in X_te.index:
+                local_customer_id = pd.Series(test_ids, index=X_te.index).get(local_index)
+        local_explanation = exp.explain_individual(local_sample)
+        base_value = local_explanation.pop("base_value", 0.0)
+        local_rows = pd.DataFrame([
+            {
+                "customer_id": local_customer_id,
+                "predicted_churn_probability": float(local_probs[local_pos]),
+                "base_value": float(base_value),
+                "feature": feature,
+                "feature_value": float(local_sample.get(feature, 0.0)),
+                "shap_value": value,
+                "abs_shap_value": abs(value),
+            }
+            for feature, value in local_explanation.items()
+        ]).sort_values("abs_shap_value", ascending=False)
+        _save_result_and_artifact(
+            local_rows,
+            results_dir / "shap_local_explanations.csv",
+            config,
+        )
+        local_plot_path = results_dir / "shap_local_waterfall.png"
+        exp.save_force_plot(local_sample, output_path=str(local_plot_path))
+        _publish_artifact(config, local_plot_path)
         logger.info("SHAP saved to %s", shap_path)
     except Exception as exc:
         logger.warning("SHAP failed: %s", exc)
@@ -836,7 +1090,7 @@ def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     if treatment.sum() == 0 or treatment.sum() == len(treatment):
         raise ValueError("run_uplift requires both treatment and control customers.")
 
-    learner_arg = getattr(args, "learner", "t_learner")
+    learner_arg = getattr(args, "learner", "auto")
     learners = ["t_learner", "s_learner"]
     comparison_rows = []
     fitted_models: Dict[str, Any] = {}
@@ -860,7 +1114,7 @@ def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     _save_result_and_artifact(comparison, results_dir / "uplift_learner_comparison.csv", config)
 
     selected = comparison.iloc[0]["learner"]
-    if learner_arg in fitted_models:
+    if learner_arg != "auto" and learner_arg in fitted_models:
         selected = learner_arg
     model = fitted_models[selected]
     scores = score_map[selected]
@@ -934,6 +1188,7 @@ def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
 def run_clv(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Predict Customer Lifetime Value and save CSV."""
     from src.models.clv_model import CLVModel
+    from src.features import FeatureEngineer
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
     data_dir, results_dir, models_dir = _resolve_dirs(args)
@@ -941,16 +1196,54 @@ def run_clv(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     events = _load_events(data_dir)
     features = _compute_features(config, customers, events, results_dir)
 
-    fcols = _feature_cols(features)
-    X = features[fcols]
+    events_for_labels = events.copy()
+    date_col = "event_date" if "event_date" in events_for_labels.columns else "event_timestamp"
+    events_for_labels[date_col] = pd.to_datetime(events_for_labels[date_col])
+    min_date = events_for_labels[date_col].min()
+    max_date = events_for_labels[date_col].max()
+    cutoff = min_date + (max_date - min_date) * 0.75
+    observation_events = events_for_labels[events_for_labels[date_col] <= cutoff].copy()
+    future_events = events_for_labels[events_for_labels[date_col] > cutoff].copy()
+    observation_features = FeatureEngineer(config).compute_all_features(
+        customers,
+        observation_events,
+        str(pd.Timestamp(cutoff).date()),
+    )
+    fcols = _feature_cols(observation_features)
+    X = observation_features[fcols]
 
-    # Target: annualised monetary proxy
-    if "monetary" in features.columns:
-        y_clv = features["monetary"].values * 12
+    amount_col = "amount" if "amount" in future_events.columns else "revenue"
+    if "event_type" in future_events.columns:
+        future_purchases = future_events[future_events["event_type"].astype(str) == "purchase"]
     else:
-        freq = features.get("frequency", pd.Series(np.ones(len(features)) * 3))
-        aov = features.get("avg_order_value", pd.Series(np.ones(len(features)) * 50000))
-        y_clv = (freq * aov * 12).values
+        future_purchases = future_events
+    if amount_col in future_purchases.columns and not future_purchases.empty:
+        future_revenue = (
+            future_purchases.groupby("customer_id")[amount_col].sum().astype(float)
+        )
+    else:
+        future_revenue = pd.Series(dtype=float)
+    future_days = max(1, int((max_date - cutoff).days))
+    annualization = 365.0 / future_days
+    obs_ids = (
+        observation_features["customer_id"]
+        if "customer_id" in observation_features.columns
+        else pd.Series(np.arange(len(observation_features)))
+    )
+    y_clv = obs_ids.map(future_revenue).fillna(0.0).astype(float).values * annualization
+    target_name = "future_revenue_12m_actual"
+    if float(np.sum(y_clv)) <= 0.0:
+        logger.warning("Future purchase revenue labels are empty; using annualized RFM fallback.")
+        if "monetary" in observation_features.columns:
+            y_clv = observation_features["monetary"].values * 12
+        else:
+            freq = observation_features.get("frequency", pd.Series(np.ones(len(observation_features)) * 3))
+            aov = observation_features.get(
+                "avg_order_value",
+                pd.Series(np.ones(len(observation_features)) * 50000),
+            )
+            y_clv = (freq * aov * 12).values
+        target_name = "future_revenue_12m_actual_fallback_rfm"
 
     logger.info("Training CLV model...")
     model = CLVModel(config)
@@ -960,7 +1253,12 @@ def run_clv(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     model.fit(X_train, y_train)
     validation: Dict[str, Any] = {
         "holdout_size": int(len(X_holdout)),
-        "target": "monetary_12m_proxy",
+        "target": target_name,
+        "observation_window_end": pd.Timestamp(cutoff).date().isoformat(),
+        "future_window_start": (pd.Timestamp(cutoff) + pd.Timedelta(days=1)).date().isoformat(),
+        "future_window_end": pd.Timestamp(max_date).date().isoformat(),
+        "label_window_days": int(future_days),
+        "annualization_factor": float(annualization),
     }
     if len(X_holdout) > 0:
         holdout_pred = model.predict(X_holdout)
@@ -970,16 +1268,17 @@ def run_clv(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
             "r2": float(r2_score(y_holdout, holdout_pred)) if len(np.unique(y_holdout)) > 1 else 0.0,
         })
         actual_vs_pred = pd.DataFrame({
-            "customer_id": features.iloc[split:]["customer_id"].values
-            if "customer_id" in features.columns else np.arange(split, len(features)),
+            "customer_id": observation_features.iloc[split:]["customer_id"].values
+            if "customer_id" in observation_features.columns else np.arange(split, len(observation_features)),
             "actual_clv": y_holdout,
             "predicted_clv": holdout_pred,
         })
         _save_result_and_artifact(actual_vs_pred, results_dir / "clv_actual_vs_predicted.csv", config)
 
-    # Refit on all available proxy labels for the final customer artifact.
+    # Refit on observation-window features and score current customer features.
     model.fit(X, y_clv)
-    preds = model.predict(X)
+    X_current = features.reindex(columns=fcols, fill_value=0.0)
+    preds = model.predict(X_current)
 
     cid = features["customer_id"].values if "customer_id" in features.columns else np.arange(len(features))
     out = pd.DataFrame({"customer_id": cid, "predicted_clv": preds})
@@ -1227,8 +1526,11 @@ def run_ab_test(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
             }
         result["power_analysis"] = {
             "required_sample_size": sample_size,
+            "required_total_sample_size": sample_size * 2,
             "baseline_rate": campaign_baseline,
             "mde": mde,
+            "target_power": 0.80,
+            "alpha": 0.05,
         }
         result["experiment_name"] = name
         result["treatment_churn_rate"] = t_mean
@@ -1416,6 +1718,26 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     )
 
     data_dir, results_dir, _ = _resolve_dirs(args)
+    stale_outputs = [
+        "cohort_analysis.json",
+        "cohort_retention_matrix.csv",
+        "cohort_milestones.csv",
+        "cohort_churn_rates.csv",
+        "cohort_retention_heatmap.png",
+        "cohort_retention_curves.png",
+        "churn_last30_sequences.json",
+        "churn_last30_sequences.csv",
+        "pre_churn_events.csv",
+        "pre_churn_events.json",
+        "journey_funnel.csv",
+        "journey_funnel.json",
+    ]
+    for directory in [results_dir, _dashboard_artifacts_dir(config)]:
+        for name in stale_outputs:
+            path = directory / name
+            if path.exists():
+                path.unlink()
+
     events = _load_events(data_dir)
     try:
         customers = _load_customers(data_dir)
@@ -1453,8 +1775,16 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     cohort_data = analyzer.assign_cohorts(cohort_events, cohort_type=cohort_type)
     retention = analyzer.compute_retention_matrix(cohort_data)
 
-    out: Dict[str, Any] = {"mode": "cohort", "status": "completed", "cohort_type": cohort_type}
-    if retention is not None:
+    errors: List[str] = []
+    out: Dict[str, Any] = {
+        "mode": "cohort",
+        "status": "completed",
+        "cohort_type": cohort_type,
+        "errors": errors,
+    }
+    if retention is None or retention.empty or retention.shape[1] < 2:
+        errors.append("retention_matrix_requires_multiple_periods")
+    else:
         out["num_cohorts"] = len(retention)
         out["retention_matrix_shape"] = list(retention.shape)
         _save_result_and_artifact(retention.reset_index(), results_dir / "cohort_retention_matrix.csv", config)
@@ -1471,6 +1801,17 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
         logger.info("Retention curves saved to %s", lines_path)
 
         milestone_df = analyzer.extract_retention_milestones(retention).reset_index()
+        required_milestones = ["M1", "M3", "M6", "M12"]
+        missing_milestones = [col for col in required_milestones if col not in milestone_df.columns]
+        null_milestones = [
+            col for col in required_milestones
+            if col in milestone_df.columns and milestone_df[col].isna().all()
+        ]
+        if missing_milestones or null_milestones:
+            errors.append(
+                "invalid_retention_milestones: "
+                + ",".join(missing_milestones + null_milestones)
+            )
         _save_result_and_artifact(milestone_df, results_dir / "cohort_milestones.csv", config)
         out["available_milestones"] = [1, 3, 6, 12]
         out["exact_milestones"] = [
@@ -1487,6 +1828,8 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
 
     try:
         seq = extract_churn_sequences(events, customers, top_n=5)
+        if len(seq) < 5:
+            errors.append("churn_sequences_requires_top5_patterns")
         if isinstance(seq, pd.DataFrame):
             _save_result_and_artifact(seq, results_dir / "churn_last30_sequences.csv", config)
         else:
@@ -1495,12 +1838,15 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     except Exception as exc:
         logger.warning("Churn sequence extraction failed: %s", exc)
         out["churn_sequences_error"] = str(exc)
+        errors.append(f"churn_sequences_error: {exc}")
 
     try:
         pre = analyze_pre_churn_events(events, customers)
         if isinstance(pre, pd.DataFrame):
             if "event_type" not in pre.columns:
                 pre = pre.reset_index().rename(columns={"index": "event_type"})
+            if pre.empty:
+                errors.append("pre_churn_events_empty")
             _save_result_and_artifact(pre, results_dir / "pre_churn_events.csv", config)
         else:
             _save_result_and_artifact(pre, results_dir / "pre_churn_events.json", config)
@@ -1508,10 +1854,13 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     except Exception as exc:
         logger.warning("Pre-churn event analysis failed: %s", exc)
         out["pre_churn_events_error"] = str(exc)
+        errors.append(f"pre_churn_events_error: {exc}")
 
     try:
         funnel = compute_journey_funnel(customers, events)
         if isinstance(funnel, pd.DataFrame):
+            if funnel.empty or funnel.shape[0] < 5:
+                errors.append("journey_funnel_requires_five_stages")
             _save_result_and_artifact(funnel, results_dir / "journey_funnel.csv", config)
         else:
             _save_result_and_artifact(funnel, results_dir / "journey_funnel.json", config)
@@ -1519,8 +1868,13 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     except Exception as exc:
         logger.warning("Journey funnel analysis failed: %s", exc)
         out["journey_funnel_error"] = str(exc)
+        errors.append(f"journey_funnel_error: {exc}")
 
+    if errors:
+        out["status"] = "failed"
     _save_result_and_artifact(out, results_dir / "cohort_analysis.json", config)
+    if errors:
+        raise RuntimeError("Cohort analysis required outputs failed: " + "; ".join(errors))
     return out
 
 
@@ -1582,7 +1936,13 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
 
     segment_labels = []
     for _, row in base.iterrows():
-        if float(row["uplift_score"]) < 0:
+        if (
+            bool(row["high_value"])
+            and bool(row["high_churn"])
+            and float(row["uplift_score"]) <= 0
+        ):
+            segment_labels.append("high_value_lost_cause")
+        elif float(row["uplift_score"]) < 0:
             segment_labels.append("sleeping_dog")
         elif bool(row["high_churn"]) and bool(row["positive_uplift"]):
             segment_labels.append(f"{row['value_tier']}_persuadable")
@@ -1620,6 +1980,32 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
     ).reset_index()
     summary["percentage"] = summary["count"] / len(result) * 100.0
     _save_result_and_artifact(summary, results_dir / "segment_summary.csv", config)
+    high_value_persuadable = result["segment"].eq("high_value_persuadable")
+    high_value_lost_cause = result["segment"].eq("high_value_lost_cause")
+    validation = {
+        "high_value_threshold": float(high_value_threshold),
+        "mid_value_threshold": float(mid_value_threshold),
+        "high_value_count": int(result["high_value"].sum()),
+        "high_risk_count": int(result["high_churn"].sum()),
+        "positive_uplift_count": int(result["positive_uplift"].sum()),
+        "high_value_persuadable_count": int(high_value_persuadable.sum()),
+        "high_value_lost_cause_count": int(high_value_lost_cause.sum()),
+        "high_value_high_risk_positive_uplift_count": int(
+            (result["high_value"] & result["high_churn"] & result["positive_uplift"]).sum()
+        ),
+        "high_value_high_risk_nonpositive_uplift_count": int(
+            (result["high_value"] & result["high_churn"] & ~result["positive_uplift"]).sum()
+        ),
+        "absence_reason": None,
+    }
+    if (
+        validation["high_value_persuadable_count"] == 0
+        and validation["high_value_lost_cause_count"] == 0
+    ):
+        validation["absence_reason"] = (
+            "No high-value customer crossed the high-risk segment threshold in this run."
+        )
+    _save_result_and_artifact(validation, results_dir / "segment_validation.json", config)
 
     try:
         import matplotlib
@@ -1882,6 +2268,7 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     checklist = _write_artifact_checklist(
         config,
         results_dir,
+        data_dir,
     )
     results["required_artifacts"] = checklist
     if checklist["missing"]:
@@ -1977,9 +2364,9 @@ Examples:
                         help="Total marketing budget in KRW (--mode optimize)")
     parser.add_argument("--small", action="store_true", default=False,
                         help="Small mode for simulation (5 000 customers, 6 months)")
-    parser.add_argument("--learner", type=str, default="t_learner",
-                        choices=["t_learner", "s_learner"],
-                        help="Uplift learner type (default: t_learner)")
+    parser.add_argument("--learner", type=str, default="auto",
+                        choices=["auto", "t_learner", "s_learner"],
+                        help="Uplift learner type (default: auto best AUUC)")
     parser.add_argument("--cohort-type", type=str, default="monthly",
                         choices=["monthly", "weekly", "behavioral"],
                         dest="cohort_type",

@@ -700,6 +700,30 @@ class DashboardDataLoader:
             if "model_type" not in df.columns and "model" in df.columns:
                 df = df.rename(columns={"model": "model_type"})
             return df
+        path = self._resolve_existing_path("model_performance_history.csv")
+        if path is not None:
+            df = pd.read_csv(path)
+            if "model_type" not in df.columns and "model" in df.columns:
+                df = df.rename(columns={"model": "model_type"})
+            if "timestamp" not in df.columns:
+                df["timestamp"] = pd.Timestamp.utcnow().isoformat()
+            if "run_id" not in df.columns:
+                run_col = df["run"].astype(str) if "run" in df.columns else pd.Series("current", index=df.index)
+                df["run_id"] = [
+                    f"{run}_{idx}" for idx, run in enumerate(run_col)
+                ]
+            for metric in ["auc", "precision", "recall", "f1_score", "accuracy"]:
+                if metric not in df.columns:
+                    df[metric] = 0.0
+            if "training_time_s" not in df.columns:
+                df["training_time_s"] = 1.0
+            else:
+                df["training_time_s"] = df["training_time_s"].fillna(1.0).clip(lower=1e-6)
+            if "params_lr" not in df.columns:
+                df["params_lr"] = 0.1
+            if "params_epochs" not in df.columns:
+                df["params_epochs"] = 1
+            return df
         return self._generate_sample_mlflow_runs()
 
     def load_roc_data(self) -> Dict[str, Dict[str, list]]:

@@ -133,7 +133,7 @@ def mock_args(config_file, tmp_data_dir):
         output=None,
         budget=None,
         small=False,
-        learner="t_learner",
+        learner="auto",
         cohort_type="monthly",
         verbose=False,
         quiet=True,
@@ -225,7 +225,7 @@ class TestBuildParser:
 
     def test_learner_default(self):
         args = build_parser(["--mode", "uplift"])
-        assert args.learner == "t_learner"
+        assert args.learner == "auto"
 
     def test_cohort_type_argument(self):
         args = build_parser(["--mode", "cohort", "--cohort-type", "weekly"])
