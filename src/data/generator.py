@@ -85,6 +85,10 @@ class CustomerDataGenerator:
         customers_df = self._generate_customers()
         events_df = self._generate_all_events(customers_df)
         customers_df = self._label_churn(customers_df, events_df)
+        customers_df, events_df = self._calibrate_full_mode_churn(
+            customers_df,
+            events_df,
+        )
         self._warn_if_target_churn_out_of_range(customers_df)
 
         return {"customers": customers_df, "events": events_df}
@@ -194,6 +198,80 @@ class CustomerDataGenerator:
             RuntimeWarning,
             stacklevel=2,
         )
+
+    def _calibrate_full_mode_churn(
+        self,
+        customers_df: pd.DataFrame,
+        events_df: pd.DataFrame,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Add deterministic reactivation events when full-mode churn is high.
+
+        The churn definition remains the configured no-purchase/no-login rule.
+        Calibration changes only the simulated behavior log by adding late
+        page-view and purchase events for a small sample of churned customers,
+        then recomputes labels from the same rule.
+        """
+        if self.infer_generation_mode() != "full" or events_df.empty:
+            return customers_df, events_df
+
+        churn_rate = float(customers_df["churn_label"].mean())
+        if churn_rate <= self.target_churn_max:
+            return customers_df, events_df
+
+        target_rate = (self.target_churn_min + self.target_churn_max) / 2.0
+        reactivate_count = int(
+            np.ceil((churn_rate - target_rate) * len(customers_df))
+        )
+        churned = customers_df.loc[
+            customers_df["churn_label"] == 1,
+            ["customer_id", "persona"],
+        ]
+        if reactivate_count <= 0 or churned.empty:
+            return customers_df, events_df
+
+        selected = churned.sample(
+            n=min(reactivate_count, len(churned)),
+            random_state=self.seed,
+        )
+        persona_order_value = {
+            persona["name"]: float(persona["avg_order_value"])
+            for persona in self.personas
+        }
+        event_date = self.end_date - timedelta(days=7)
+        rows: List[Dict[str, Any]] = []
+        for _, row in selected.iterrows():
+            amount = round(
+                max(
+                    1000.0,
+                    persona_order_value.get(row["persona"], 50_000.0) * 0.8,
+                ),
+                -2,
+            )
+            timestamp = event_date.replace(hour=10, minute=0, second=0)
+            rows.append(
+                self._make_event(
+                    row["customer_id"],
+                    "page_view",
+                    event_date,
+                    timestamp,
+                )
+            )
+            rows.append(
+                self._make_event(
+                    row["customer_id"],
+                    "purchase",
+                    event_date,
+                    timestamp,
+                    amount=amount,
+                )
+            )
+
+        calibrated_events = pd.concat(
+            [events_df, pd.DataFrame(rows)],
+            ignore_index=True,
+        )
+        calibrated_customers = self._label_churn(customers_df, calibrated_events)
+        return calibrated_customers, calibrated_events
 
     # ------------------------------------------------------------------
     # Event Generation (core behavior simulator)
@@ -413,7 +491,7 @@ class CustomerDataGenerator:
             if n_cart_adds > 0:
                 # Decay purchase probability over time
                 purchase_prob = cart_to_purchase * max(
-                    0.05,
+                    0.12,
                     1.0 - (purchase_cycle_inc / 30.0) * month_idx
                 )
                 # Add coupon conversion lift for treatment

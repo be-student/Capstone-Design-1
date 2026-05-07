@@ -448,6 +448,7 @@ def _validate_required_artifact(
                 if not (
                     payload.get("high_value_persuadable_count", 0) > 0
                     or payload.get("high_value_lost_cause_count", 0) > 0
+                    or payload.get("high_value_sure_thing_count", 0) > 0
                     or payload.get("absence_reason")
                 ):
                     return {"valid": False, "reason": "missing_high_value_segment_evidence"}
@@ -1942,6 +1943,12 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
             and float(row["uplift_score"]) <= 0
         ):
             segment_labels.append("high_value_lost_cause")
+        elif (
+            bool(row["high_value"])
+            and not bool(row["high_churn"])
+            and float(row["uplift_score"]) <= 0
+        ):
+            segment_labels.append("high_value_sure_thing")
         elif float(row["uplift_score"]) < 0:
             segment_labels.append("sleeping_dog")
         elif bool(row["high_churn"]) and bool(row["positive_uplift"]):
@@ -1982,6 +1989,7 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
     _save_result_and_artifact(summary, results_dir / "segment_summary.csv", config)
     high_value_persuadable = result["segment"].eq("high_value_persuadable")
     high_value_lost_cause = result["segment"].eq("high_value_lost_cause")
+    high_value_sure_thing = result["segment"].eq("high_value_sure_thing")
     validation = {
         "high_value_threshold": float(high_value_threshold),
         "mid_value_threshold": float(mid_value_threshold),
@@ -1990,6 +1998,7 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
         "positive_uplift_count": int(result["positive_uplift"].sum()),
         "high_value_persuadable_count": int(high_value_persuadable.sum()),
         "high_value_lost_cause_count": int(high_value_lost_cause.sum()),
+        "high_value_sure_thing_count": int(high_value_sure_thing.sum()),
         "high_value_high_risk_positive_uplift_count": int(
             (result["high_value"] & result["high_churn"] & result["positive_uplift"]).sum()
         ),
@@ -2001,6 +2010,7 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
     if (
         validation["high_value_persuadable_count"] == 0
         and validation["high_value_lost_cause_count"] == 0
+        and validation["high_value_sure_thing_count"] == 0
     ):
         validation["absence_reason"] = (
             "No high-value customer crossed the high-risk segment threshold in this run."
@@ -2225,8 +2235,50 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         "step_order": PipelineRunner(config=config).get_step_order(),
     }
     state = runner.get_state()
-    if state.get("run_context") != run_context:
-        logger.info("Pipeline run context changed; resetting checkpoint state.")
+    def _csv_row_count(path: Path) -> Optional[int]:
+        if not path.exists():
+            return None
+        try:
+            return int(len(pd.read_csv(path, usecols=[0])))
+        except Exception:
+            return None
+
+    def _stale_completed_stage_reasons(state_payload: Dict[str, Any]) -> List[str]:
+        stages = state_payload.get("stages", {}) or {}
+        reasons = [
+            f"{stage_name}_failed"
+            for stage_name, stage in stages.items()
+            if stage.get("status") == "failed"
+        ]
+        expected_rows = int(run_context["num_customers"])
+        row_checked_outputs = {
+            "preprocessing": "features.csv",
+            "ml_model_training": "churn_predictions.csv",
+            "uplift_modeling": "uplift_results.csv",
+            "clv_prediction": "clv_predictions.csv",
+            "customer_segmentation": "segments_6plus.csv",
+            "budget_optimization": "budget_optimization.csv",
+            "recommendations": "recommendations.csv",
+        }
+        for stage_name, artifact in row_checked_outputs.items():
+            if stages.get(stage_name, {}).get("status") != "completed":
+                continue
+            row_count = _csv_row_count(results_dir / artifact)
+            if row_count != expected_rows:
+                reasons.append(
+                    f"{artifact}_row_count_{row_count}_expected_{expected_rows}"
+                )
+        return reasons
+
+    stale_reasons = _stale_completed_stage_reasons(state)
+    if state.get("run_context") != run_context or stale_reasons:
+        if stale_reasons:
+            logger.info(
+                "Pipeline checkpoint artifacts are stale (%s); resetting state.",
+                ", ".join(stale_reasons),
+            )
+        else:
+            logger.info("Pipeline run context changed; resetting checkpoint state.")
         runner._state.reset()
         state = runner.get_state()
         state["run_context"] = run_context
