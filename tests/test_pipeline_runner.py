@@ -191,9 +191,9 @@ class TestSeedTracking:
 class TestCanonicalStepOrder:
     """Test PIPELINE_STEP_ORDER constant."""
 
-    def test_has_14_steps(self):
-        """Canonical order has 14 steps."""
-        assert len(PIPELINE_STEP_ORDER) == 14
+    def test_has_16_steps(self):
+        """Canonical order has 16 steps."""
+        assert len(PIPELINE_STEP_ORDER) == 16
 
     def test_first_is_data_generation(self):
         assert PIPELINE_STEP_ORDER[0] == "data_generation"
@@ -210,3 +210,13 @@ class TestCanonicalStepOrder:
         dl_idx = PIPELINE_STEP_ORDER.index("dl_model_training")
         ens_idx = PIPELINE_STEP_ORDER.index("ensemble_creation")
         assert ens_idx > dl_idx
+
+    def test_segment_after_clv(self):
+        clv_idx = PIPELINE_STEP_ORDER.index("clv_prediction")
+        segment_idx = PIPELINE_STEP_ORDER.index("customer_segmentation")
+        assert segment_idx > clv_idx
+
+    def test_cohort_before_ab_testing(self):
+        cohort_idx = PIPELINE_STEP_ORDER.index("cohort_analysis")
+        ab_idx = PIPELINE_STEP_ORDER.index("ab_testing")
+        assert ab_idx > cohort_idx

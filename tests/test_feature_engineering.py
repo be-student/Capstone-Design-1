@@ -439,6 +439,39 @@ class TestFeatureStore:
         assert len(loaded) == len(computed_features)
         assert set(loaded.columns) == set(computed_features.columns)
 
+    def test_save_features_csv_fallback_when_parquet_fails(
+        self, feature_engineer, computed_features, tmp_path, monkeypatch
+    ):
+        """CSV should still be saved when parquet write fails."""
+        store_path = tmp_path / "feature_store"
+
+        def fail_to_parquet(*args, **kwargs):
+            raise ImportError("missing parquet engine")
+
+        monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
+        feature_engineer.save_to_feature_store(computed_features, str(store_path))
+
+        assert not (store_path / "features.parquet").exists()
+        assert (store_path / "features.csv").exists()
+
+    def test_load_features_csv_fallback_when_parquet_read_fails(
+        self, feature_engineer, computed_features, tmp_path, monkeypatch
+    ):
+        """CSV fallback should be used when parquet read fails."""
+        store_path = tmp_path / "feature_store"
+        store_path.mkdir()
+        computed_features.to_csv(store_path / "features.csv", index=False)
+        (store_path / "features.parquet").write_text("broken parquet placeholder")
+
+        def fail_read_parquet(*args, **kwargs):
+            raise ImportError("missing parquet engine")
+
+        monkeypatch.setattr(pd, "read_parquet", fail_read_parquet)
+        loaded = feature_engineer.load_from_feature_store(str(store_path))
+
+        assert isinstance(loaded, pd.DataFrame)
+        assert len(loaded) == len(computed_features)
+
 
 class TestFeatureCount:
     """Test total feature count meets requirements."""

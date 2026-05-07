@@ -231,7 +231,7 @@ Identifies persuadables, sure things, lost causes, and sleeping dogs.
 #### Customer Lifetime Value
 
 ```bash
-# Predict CLV using BG/NBD + Gamma-Gamma models
+# Predict CLV using the ML-based 12-month value model
 python src/main.py --mode clv
 ```
 
@@ -277,7 +277,7 @@ python src/main.py --mode cohort
 #### Customer Segmentation
 
 ```bash
-# RFM-based and K-means segmentation
+# Churn/uplift/CLV-based 6+ segment classification
 python src/main.py --mode segment
 ```
 
@@ -302,7 +302,7 @@ python src/main.py --mode dashboard
 python src/main.py --mode all
 ```
 
-Runs: simulate → features → train → uplift → clv → optimize → ab_test → survival → recommend → cohort → segment → monitor.
+Runs: simulate → features → train → uplift → clv → segment → optimize → recommend → cohort → ab_test → survival → monitor.
 
 ### Example Workflows
 
@@ -425,7 +425,7 @@ The Docker Compose configuration sets these automatically:
 
 All services include health checks:
 
-- **MLflow**: HTTP GET `http://localhost:5000/health`
+- **MLflow**: HTTP GET `http://localhost:5001/health` from the host, or `http://mlflow:5000/health` inside Docker
 - **Redis**: `redis-cli ping`
 - **Dashboard**: HTTP GET `http://localhost:8501/_stcore/health`
 

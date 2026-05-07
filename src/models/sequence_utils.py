@@ -3,14 +3,15 @@ PyTorch Dataset and Sequence Preparation Utilities.
 
 Converts customer feature data into sequential format suitable for
 LSTM/Transformer input. Supports configurable window sizes, zero-padding
-for short sequences, and proper chronological ordering.
+for short sequences, chronological ordering, and a safe pseudo-sequence
+fallback for legacy tabular training paths.
 """
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 
 def create_sequences(
@@ -84,6 +85,101 @@ def create_sequences(
         "labels": np.array(seq_labels, dtype=np.float32),
         "customer_ids": customer_ids,
     }
+
+
+def scale_sequences(
+    sequences: np.ndarray,
+    feature_mean: Optional[np.ndarray] = None,
+    feature_std: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray]:
+    """Standardize 3D sequence tensors feature-wise across all timesteps."""
+    seq = np.asarray(sequences, dtype=np.float32)
+    if seq.ndim != 3:
+        raise ValueError("Expected sequences with shape (n, t, f).")
+
+    flattened = seq.reshape(-1, seq.shape[-1])
+    if feature_mean is None:
+        feature_mean = flattened.mean(axis=0)
+    if feature_std is None:
+        feature_std = flattened.std(axis=0) + 1e-8
+
+    scaled = ((seq - feature_mean.reshape(1, 1, -1))
+              / feature_std.reshape(1, 1, -1)).astype(np.float32)
+    return {
+        "sequences": scaled,
+        "feature_mean": feature_mean.astype(np.float32),
+        "feature_std": feature_std.astype(np.float32),
+        "sequence_source": "event_sequence",
+    }
+
+
+def tabular_to_pseudo_sequences(
+    data: pd.DataFrame,
+    window_size: int,
+    feature_mean: Optional[np.ndarray] = None,
+    feature_std: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray]:
+    """Convert tabular rows to deterministic pseudo-sequences.
+
+    This keeps the legacy DL path working, but marks the source explicitly so
+    callers can distinguish it from real event-sequence inputs.
+    """
+    values = data.values.astype(np.float32)
+
+    if feature_mean is None:
+        feature_mean = values.mean(axis=0)
+    if feature_std is None:
+        feature_std = values.std(axis=0) + 1e-8
+
+    normalized = (values - feature_mean) / feature_std
+    sequences = np.tile(
+        normalized[:, np.newaxis, :], (1, window_size, 1)
+    ).astype(np.float32)
+
+    for t in range(window_size):
+        scale = (t + 1) / window_size
+        sequences[:, t, :] *= scale
+
+    return {
+        "sequences": sequences,
+        "feature_mean": feature_mean.astype(np.float32),
+        "feature_std": feature_std.astype(np.float32),
+        "sequence_source": "pseudo_sequence",
+    }
+
+
+def prepare_sequence_training_data(
+    data: Union[pd.DataFrame, Dict[str, np.ndarray]],
+    labels: Optional[pd.DataFrame] = None,
+    window_size: int = 6,
+    time_col: str = "month",
+    customer_col: str = "customer_id",
+    label_col: str = "churn_label",
+    feature_mean: Optional[np.ndarray] = None,
+    feature_std: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray]:
+    """Normalize either real sequence input or a prebuilt sequence payload."""
+    if isinstance(data, dict):
+        payload = dict(data)
+    else:
+        if labels is None:
+            raise ValueError("labels must be provided for sequential DataFrame input.")
+        payload = create_sequences(
+            data=data,
+            labels=labels,
+            window_size=window_size,
+            time_col=time_col,
+            customer_col=customer_col,
+            label_col=label_col,
+        )
+
+    scaled = scale_sequences(
+        payload["sequences"],
+        feature_mean=feature_mean,
+        feature_std=feature_std,
+    )
+    payload.update(scaled)
+    return payload
 
 
 class ChurnSequenceDataset(Dataset):

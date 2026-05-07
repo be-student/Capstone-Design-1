@@ -135,6 +135,10 @@ class TestABTestFrameworkInterface:
         expected_ratio = config["treatment"]["treatment_ratio"]
         assert ab_test_framework.treatment_ratio == expected_ratio
 
+    def test_has_dashboard_adapter_helpers(self, ab_test_framework):
+        assert hasattr(ab_test_framework, "to_dashboard_experiment")
+        assert hasattr(ab_test_framework, "to_dashboard_detailed_results")
+
 
 # ---------------------------------------------------------------------------
 # Group assignment tests
@@ -273,6 +277,55 @@ class TestStatisticalSignificance:
 
         assert "p_value" in result
         assert 0 <= result["p_value"] <= 1
+
+
+class TestDashboardAdapters:
+    def test_single_result_converts_to_dashboard_schema(self, ab_test_framework):
+        raw = {
+            "experiment_name": "coupon",
+            "treatment_size": 500,
+            "control_size": 500,
+            "treatment_mean": 0.12,
+            "control_mean": 0.20,
+            "p_value": 0.01,
+            "is_significant": True,
+            "confidence_interval": [-0.12, -0.04],
+            "test_used": "z_test_proportions",
+        }
+        converted = ab_test_framework.to_dashboard_experiment(raw)
+        assert converted["name"] == "coupon"
+        assert converted["treatment_churn_rate"] == pytest.approx(0.12)
+        assert converted["control_churn_rate"] == pytest.approx(0.20)
+        assert "effect_size_cohens_h" in converted
+
+    def test_batch_results_converts_to_experiments_array(self, ab_test_framework):
+        payload = {
+            "experiments": [
+                {
+                    "name": "email",
+                    "treatment_mean": 0.10,
+                    "control_mean": 0.20,
+                    "treatment_size": 400,
+                    "control_size": 400,
+                    "p_value": 0.02,
+                    "is_significant": True,
+                    "confidence_interval": [-0.15, -0.05],
+                },
+                {
+                    "name": "push",
+                    "treatment_mean": 0.18,
+                    "control_mean": 0.20,
+                    "treatment_size": 300,
+                    "control_size": 300,
+                    "p_value": 0.20,
+                    "is_significant": False,
+                    "confidence_interval": [-0.06, 0.02],
+                },
+            ],
+        }
+        detailed = ab_test_framework.to_dashboard_detailed_results(payload)
+        assert detailed["summary"]["total_experiments"] == 2
+        assert len(detailed["experiments"]) == 2
 
     def test_significance_with_binary_metric(self, ab_test_framework,
                                                sample_experiment_data):

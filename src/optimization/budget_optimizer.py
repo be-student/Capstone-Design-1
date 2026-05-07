@@ -44,6 +44,8 @@ from scipy.optimize import linprog, OptimizeResult
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WHATIF_MULTIPLIERS = (0.5, 1.0, 2.0)
+
 
 # ---------------------------------------------------------------------------
 # Validation helpers
@@ -685,6 +687,31 @@ class LPBudgetOptimizer:
         retained = np.sum(fraction * np.maximum(uplift, 0) * clv * churn_prob)
         return float(retained)
 
+    def summarize_result_metrics(
+        self,
+        result: OptimizationResult,
+        data: pd.DataFrame,
+    ) -> Dict[str, float]:
+        """Build dashboard-friendly metrics from an optimization result."""
+        expected_revenue_saved = self.compute_expected_value(result, data)
+        total_allocated = float(result.total_allocated)
+        roi = (
+            expected_revenue_saved / total_allocated
+            if total_allocated > 0
+            else 0.0
+        )
+        customer_allocs = self.get_customer_allocations(result)
+        customers_treated = int(
+            (customer_allocs["allocated_budget"] > 1e-8).sum()
+        )
+        return {
+            "total_allocated": total_allocated,
+            "retained_value": expected_revenue_saved,
+            "expected_revenue_saved": expected_revenue_saved,
+            "roi": roi,
+            "customers_treated": customers_treated,
+        }
+
     # ------------------------------------------------------------------
     # What-If Scenario Analysis
     # ------------------------------------------------------------------
@@ -758,20 +785,12 @@ class LPBudgetOptimizer:
             total_budget=total_budget,
         )
 
-        # Compute metrics from optimization result
-        total_allocated = float(opt_result.total_allocated)
-        retained_value = float(opt_result.objective_value)
-
-        # Count customers with non-trivial allocation
         alloc_df = opt_result.allocations
         customer_allocs = (
             alloc_df.groupby("customer_id", as_index=False)["allocated_budget"]
             .sum()
         )
-        customers_treated = int((customer_allocs["allocated_budget"] > 1e-8).sum())
-
-        # ROI: retained value per unit spent
-        roi = retained_value / total_allocated if total_allocated > 0 else 0.0
+        metrics = self.summarize_result_metrics(opt_result, scenario_data)
 
         # Project churn rate impact
         projected_churn_rate = self._project_churn_rate(
@@ -788,10 +807,7 @@ class LPBudgetOptimizer:
         return {
             "scenario_name": scenario_name,
             "total_budget": total_budget,
-            "total_allocated": total_allocated,
-            "retained_value": retained_value,
-            "roi": roi,
-            "customers_treated": customers_treated,
+            **metrics,
             "projected_churn_rate": projected_churn_rate,
             "projected_revenue_impact": projected_revenue_impact,
             "status": opt_result.status,
@@ -832,7 +848,7 @@ class LPBudgetOptimizer:
     def run_budget_sweep(
         self,
         data: pd.DataFrame,
-        budget_levels: List[float],
+        budget_levels: Optional[List[float]] = None,
         cost_multiplier: float = 1.0,
         uplift_multiplier: float = 1.0,
     ) -> pd.DataFrame:
@@ -854,6 +870,12 @@ class LPBudgetOptimizer:
         pd.DataFrame
             One row per budget level with metric columns.
         """
+        if budget_levels is None:
+            budget_levels = [
+                self.total_budget * multiplier
+                for multiplier in DEFAULT_WHATIF_MULTIPLIERS
+            ]
+
         scenarios = [
             WhatIfScenario(
                 name=f"budget_{int(b / 1_000_000)}M",
@@ -1210,11 +1232,7 @@ def run_whatif(
     if scenarios is None and budget_levels is None:
         # Default: run a 3-level budget sweep
         base = cost_config.total_budget
-        default_levels = [
-            base * 0.5,
-            base,
-            base * 1.5,
-        ]
+        default_levels = [base * multiplier for multiplier in DEFAULT_WHATIF_MULTIPLIERS]
         budget_sweep = optimizer.run_budget_sweep(
             data=data, budget_levels=default_levels,
         )

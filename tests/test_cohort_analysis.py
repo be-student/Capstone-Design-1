@@ -356,6 +356,58 @@ class TestCohortMetrics:
                     np.ones_like(retention.values),
                 )
 
+    def test_extract_retention_milestones(
+        self, analyzer: CohortAnalyzer, sample_events: pd.DataFrame
+    ) -> None:
+        """Milestone extraction should return reusable M0/M1/M3/M6/M12 columns."""
+        cohort_data = analyzer.assign_cohorts(sample_events, cohort_type="monthly")
+        retention = analyzer.compute_retention_matrix(cohort_data)
+        milestones = analyzer.extract_retention_milestones(retention)
+
+        assert list(milestones.columns) == ["M0", "M1", "M3", "M6", "M12"]
+        assert "2024-01" in milestones.index
+
+    def test_extract_retention_milestones_uses_latest_observed_period(
+        self, analyzer: CohortAnalyzer
+    ) -> None:
+        """Missing long-horizon milestones should use latest observed retention."""
+        retention = pd.DataFrame(
+            {0: [1.0], 1: [0.8], 3: [0.6]},
+            index=pd.Index(["2024-01"], name="cohort"),
+        )
+
+        milestones = analyzer.extract_retention_milestones(retention)
+
+        assert milestones.loc["2024-01", "M6"] == 0.6
+        assert milestones.loc["2024-01", "M12"] == 0.6
+
+    def test_analyze_churn_signals_returns_reusable_outputs(
+        self, analyzer: CohortAnalyzer
+    ) -> None:
+        """Churn signal bundle should expose sequences, pre-churn events, and funnel."""
+        customers = pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3"],
+            "churn_label": [1, 0, 1],
+        })
+        events = pd.DataFrame({
+            "customer_id": ["C1", "C1", "C2", "C2", "C3", "C3", "C3"],
+            "event_type": [
+                "page_view", "purchase", "page_view", "purchase",
+                "page_view", "add_to_cart", "purchase",
+            ],
+            "event_date": pd.to_datetime([
+                "2024-01-01", "2024-01-15", "2024-01-03", "2024-01-18",
+                "2024-01-05", "2024-01-10", "2024-01-22",
+            ]),
+        })
+
+        result = analyzer.analyze_churn_signals(customers, events, n_days=30, top_n=3)
+
+        assert {"top_sequences", "pre_churn_events", "journey_funnel"} == set(result)
+        assert isinstance(result["top_sequences"], list)
+        assert isinstance(result["pre_churn_events"], pd.DataFrame)
+        assert isinstance(result["journey_funnel"], pd.DataFrame)
+
     def test_revenue_metric(
         self, analyzer: CohortAnalyzer, sample_events: pd.DataFrame
     ) -> None:
@@ -750,7 +802,7 @@ class TestFullAnalysis:
         expected_keys = {
             "cohort_data", "retention_matrix", "retention_curves",
             "avg_retention_curve", "churn_rates", "half_life",
-            "summary", "metrics",
+            "summary", "metrics", "milestone_retention",
         }
         assert set(result.keys()) == expected_keys
 

@@ -264,6 +264,11 @@ class TestDataLoaderIntegration:
         assert "experiment_name" in results
         assert "p_value" in results
 
+    def test_metric_history_loaders_return_dataframes(self, data_loader):
+        assert isinstance(data_loader.load_auc_history(), pd.DataFrame)
+        assert isinstance(data_loader.load_precision_history(), pd.DataFrame)
+        assert isinstance(data_loader.load_recall_history(), pd.DataFrame)
+
     def test_load_budget_results_returns_dataframe(self, data_loader):
         """Budget results must return a DataFrame with allocations."""
         df = data_loader.load_budget_results()

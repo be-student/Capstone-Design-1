@@ -262,6 +262,51 @@ class TestDLTrainerTraining:
         assert result["architecture"] == "transformer"
         assert len(result["history"]) > 0
 
+    def test_prepare_sequence_inputs_accepts_real_sequence_payload(self, small_config):
+        """Trainer should accept actual sequence payloads for DL training."""
+        from src.models.dl_trainer import DLTrainer
+        from src.models.sequence_utils import prepare_sequence_training_data
+
+        np.random.seed(7)
+        rows = []
+        for cid in ["C1", "C2", "C3", "C4"]:
+            for month in [1, 2, 3]:
+                rows.append([cid, month, np.random.randn(), np.random.randn()])
+        seq_df = pd.DataFrame(rows, columns=["customer_id", "month", "f1", "f2"])
+        labels = pd.DataFrame(
+            {"customer_id": ["C1", "C2", "C3", "C4"], "churn_label": [0, 1, 0, 1]}
+        )
+
+        trainer = DLTrainer(small_config)
+        payload = prepare_sequence_training_data(
+            seq_df, labels=labels, window_size=trainer.sequence_window
+        )
+        prepared = trainer.prepare_sequence_inputs(sequence_data=payload)
+        assert prepared["sequence_source"] == "event_sequence"
+        assert prepared["sequences"].ndim == 3
+
+    def test_train_single_architecture_with_sequence_payload(self, small_config):
+        """Training path should support prebuilt sequence tensors."""
+        from src.models.dl_trainer import DLTrainer
+
+        small_config["dl_model"]["epochs"] = 2
+        trainer = DLTrainer(small_config)
+        np.random.seed(11)
+        n = 24
+        seq = np.random.randn(n, trainer.sequence_window, 3).astype(np.float32)
+        labels = np.random.randint(0, 2, size=n).astype(np.float32)
+        payload = {"sequences": seq, "labels": labels}
+        dummy_X = pd.DataFrame(np.random.randn(n, 3), columns=["a", "b", "c"])
+
+        result = trainer.train_single_architecture(
+            dummy_X,
+            labels,
+            architecture="lstm",
+            sequence_train_data=payload,
+        )
+        assert result["model"] is not None
+        assert len(result["history"]) > 0
+
     def test_train_returns_history(self, small_config, sample_data):
         """Training must return epoch-by-epoch history."""
         from src.models.dl_trainer import DLTrainer

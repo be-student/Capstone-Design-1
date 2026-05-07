@@ -179,9 +179,33 @@ class KSDriftReport:
     def to_dict(self) -> Dict:
         """Return JSON-serializable representation of the full report."""
         return {
+            "feature_alerts": {
+                k: v.to_dict() for k, v in self.feature_alerts.items()
+            },
             "alerts": {k: v.to_dict() for k, v in self.feature_alerts.items()},
             "summary": self.summary(),
         }
+
+    @classmethod
+    def from_dict(cls, payload: Dict) -> "KSDriftReport":
+        """Reconstruct a KSDriftReport from serialized payload."""
+        alerts_payload = payload.get("feature_alerts") or payload.get("alerts") or {}
+        feature_alerts = {
+            name: KSDriftAlert(
+                statistic=alert.get("statistic", 0.0),
+                p_value=alert.get("p_value", 1.0),
+                feature_name=alert.get("feature_name", name),
+                test_type=alert.get("test_type", "ks"),
+                warning_threshold=alert.get(
+                    "warning_threshold", DEFAULT_WARNING_THRESHOLD
+                ),
+                drift_threshold=alert.get(
+                    "drift_threshold", DEFAULT_DRIFT_THRESHOLD
+                ),
+            )
+            for name, alert in alerts_payload.items()
+        }
+        return cls(feature_alerts=feature_alerts)
 
 
 class KSDriftDetector:

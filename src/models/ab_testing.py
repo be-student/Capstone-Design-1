@@ -28,6 +28,13 @@ from scipy import stats
 logger = logging.getLogger(__name__)
 
 
+def _safe_rate_from_mean(value: float) -> float:
+    """Clamp a mean-like value into the [0, 1] rate range."""
+    if np.isnan(value):
+        return 0.0
+    return float(np.clip(value, 0.0, 1.0))
+
+
 # ---------------------------------------------------------------------------
 # Power Analysis
 # ---------------------------------------------------------------------------
@@ -579,6 +586,112 @@ class ABTestFramework:
         }
 
         return summary
+
+    def to_dashboard_experiment(
+        self,
+        result: Dict[str, Any],
+        *,
+        name: Optional[str] = None,
+        duration_days: Optional[int] = None,
+        power: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Convert a single A/B result into dashboard detailed schema."""
+        treatment_rate = result.get("treatment_churn_rate")
+        control_rate = result.get("control_churn_rate")
+
+        if treatment_rate is None:
+            treatment_rate = result.get("treatment_mean", 0.0)
+        if control_rate is None:
+            control_rate = result.get("control_mean", 0.0)
+
+        treatment_rate = _safe_rate_from_mean(float(treatment_rate))
+        control_rate = _safe_rate_from_mean(float(control_rate))
+        absolute_effect = float(treatment_rate - control_rate)
+
+        lift = result.get("lift")
+        if lift is None:
+            relative = result.get("relative_lift")
+            if relative is not None:
+                lift = float(relative)
+            elif control_rate != 0:
+                lift = (control_rate - treatment_rate) / abs(control_rate)
+            else:
+                lift = 0.0
+
+        ci = result.get("confidence_interval")
+        if ci is None:
+            ci = (absolute_effect, absolute_effect)
+        effect_size = result.get("effect_size_cohens_h")
+        if effect_size is None:
+            p1 = np.clip(treatment_rate, 1e-6, 1 - 1e-6)
+            p2 = np.clip(control_rate, 1e-6, 1 - 1e-6)
+            effect_size = 2 * (
+                np.arcsin(np.sqrt(p1)) - np.arcsin(np.sqrt(p2))
+            )
+
+        statistically_significant = bool(result.get("is_significant", False))
+        beneficial_significant = statistically_significant and treatment_rate < control_rate
+        derived_power = (
+            power
+            if power is not None
+            else float(result.get("power", self.power_analysis.compute_power(
+                n=max(int(result.get("treatment_size", 0)), 1),
+                baseline_rate=control_rate if 0 < control_rate < 1 else 0.5,
+                mde=max(abs(absolute_effect), 1e-6),
+                alpha=float(result.get("alpha", 0.05)),
+            )))
+        )
+
+        return {
+            "name": name or result.get("experiment_name") or result.get("name", "Experiment"),
+            "treatment_size": int(result.get("treatment_size", 0)),
+            "control_size": int(result.get("control_size", 0)),
+            "treatment_churn_rate": treatment_rate,
+            "control_churn_rate": control_rate,
+            "lift": float(lift),
+            "p_value": float(result.get("p_value", 1.0)),
+            "is_significant": beneficial_significant,
+            "confidence_interval": [float(ci[0]), float(ci[1])],
+            "effect_size_cohens_h": float(abs(effect_size)),
+            "power": float(np.clip(derived_power, 0.0, 1.0)),
+            "alpha": float(result.get("alpha", 0.05)),
+            "absolute_effect": absolute_effect,
+            "test_type": result.get("test_used", result.get("test_type", "unknown")),
+            "duration_days": int(duration_days if duration_days is not None else result.get("duration_days", 14)),
+        }
+
+    def to_dashboard_detailed_results(
+        self,
+        results: Union[Dict[str, Any], List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """Convert framework or CLI results into detailed dashboard schema."""
+        if isinstance(results, dict) and "experiments" in results:
+            experiments = results["experiments"]
+        elif isinstance(results, dict):
+            experiments = [results]
+        else:
+            experiments = list(results)
+
+        converted = [
+            self.to_dashboard_experiment(exp, name=exp.get("name"))
+            for exp in experiments
+        ]
+        best_experiment = None
+        if converted:
+            best_experiment = max(
+                converted,
+                key=lambda exp: (exp["is_significant"], exp["lift"]),
+            )["name"]
+        summary = {
+            "total_experiments": len(converted),
+            "significant_count": sum(1 for exp in converted if exp["is_significant"]),
+            "best_experiment": best_experiment,
+            "avg_lift": float(np.mean([exp["lift"] for exp in converted])) if converted else 0.0,
+        }
+        return {
+            "experiments": converted,
+            "summary": summary,
+        }
 
     # ------------------------------------------------------------------
     # Persistence

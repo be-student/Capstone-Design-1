@@ -116,6 +116,7 @@ class SimulatorOrchestrator:
             # Compute summary
             elapsed = time.time() - start_time
             summary = self._compute_summary(customers_df, events_df, elapsed)
+            self._enforce_generation_requirements(summary)
 
             # Save outputs
             self._save_outputs(customers_df, events_df, summary, output_dir)
@@ -185,6 +186,7 @@ class SimulatorOrchestrator:
         # Convert numpy types for JSON serialization
         event_dist = {k: int(v) for k, v in event_dist.items()}
         persona_dist = {k: float(v) for k, v in persona_dist.items()}
+        validation = self._build_validation_summary(customers_df)
 
         return {
             "num_customers": num_customers,
@@ -198,7 +200,72 @@ class SimulatorOrchestrator:
             "generation_time_seconds": round(elapsed_seconds, 2),
             "generated_at": datetime.now().isoformat(),
             "random_seed": self.config["simulation"]["random_seed"],
+            "generation_mode": validation["mode"],
+            "validation": validation,
         }
+
+    def _build_validation_summary(
+        self,
+        customers_df: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """Summarize generator requirement checks for reporting and enforcement."""
+        target_cfg = self.config["target_churn_rate"]
+        treatment_cfg = self.config["treatment"]
+        mode = self.generator.infer_generation_mode()
+        churn_rate = float(customers_df["churn_label"].mean())
+        treatment_count = int((customers_df["treatment_group"] == "treatment").sum())
+        control_count = int((customers_df["treatment_group"] == "control").sum())
+        min_group_size = int(treatment_cfg.get("min_group_size", 0))
+
+        group_size_check = {
+            "required_min_per_group": min_group_size,
+            "treatment_count": treatment_count,
+            "control_count": control_count,
+            "passed": treatment_count >= min_group_size and control_count >= min_group_size,
+        }
+        target_churn_check = {
+            "target_min": float(target_cfg["min"]),
+            "target_max": float(target_cfg["max"]),
+            "actual": churn_rate,
+            "passed": target_cfg["min"] <= churn_rate <= target_cfg["max"],
+        }
+
+        warnings = []
+        if mode == "small":
+            warnings.append(
+                "Small mode summary only: treatment/control 10000-min validation is skipped."
+            )
+        elif not group_size_check["passed"]:
+            warnings.append("Treatment/control minimum group size requirement failed.")
+
+        if not target_churn_check["passed"]:
+            warnings.append(
+                "Generated churn rate is outside the configured 15%-25% target band."
+            )
+
+        return {
+            "mode": mode,
+            "group_size_check": group_size_check,
+            "target_churn_check": target_churn_check,
+            "warnings": warnings,
+        }
+
+    def _enforce_generation_requirements(self, summary: Dict[str, Any]) -> None:
+        """Fail full-mode runs when hard simulator requirements are not met."""
+        validation = summary["validation"]
+        if validation["mode"] != "full":
+            return
+
+        failures = []
+        if not validation["group_size_check"]["passed"]:
+            failures.append("treatment/control minimum group size")
+        if not validation["target_churn_check"]["passed"]:
+            failures.append("target churn range")
+
+        if failures:
+            raise ValueError(
+                "Generated data failed full-mode validation: " + ", ".join(failures)
+            )
 
     def _save_outputs(
         self,

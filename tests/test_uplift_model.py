@@ -279,6 +279,18 @@ class TestUpliftSegmentation:
 
         assert len(segments) == len(sample_uplift_data)
 
+    def test_segment_customers_with_baseline_churn(self, uplift_model):
+        """Baseline churn input should disambiguate sure things vs lost causes."""
+        uplift_scores = np.array([0.12, 0.01, 0.02, -0.05])
+        baseline = np.array([0.9, 0.1, 0.8, 0.7])
+        segments = uplift_model.segment_customers(
+            uplift_scores,
+            baseline_churn_probability=baseline,
+        )
+        assert set(segments) == {
+            "persuadable", "sure_thing", "lost_cause", "sleeping_dog"
+        }
+
     def test_segment_categories(self, uplift_model, sample_uplift_data):
         """Segments must include standard uplift categories."""
         feature_cols = [c for c in sample_uplift_data.columns

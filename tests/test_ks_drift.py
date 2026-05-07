@@ -261,6 +261,37 @@ class TestKSDriftAlert:
         # p_value <= warning_threshold → warning
         assert alert.level == "warning"
 
+
+class TestKSReportSerialization:
+    def test_to_dict_includes_feature_alerts(self):
+        report = KSDriftReport(
+            feature_alerts={
+                "feat": KSDriftAlert(
+                    statistic=0.2,
+                    p_value=0.001,
+                    feature_name="feat",
+                    test_type="ks",
+                )
+            }
+        )
+        payload = report.to_dict()
+        assert "feature_alerts" in payload
+        assert payload["feature_alerts"]["feat"]["test_type"] == "ks"
+
+    def test_from_dict_accepts_feature_alerts_key(self):
+        payload = {
+            "feature_alerts": {
+                "feat": {
+                    "statistic": 0.2,
+                    "p_value": 0.001,
+                    "feature_name": "feat",
+                    "test_type": "ks",
+                }
+            }
+        }
+        report = KSDriftReport.from_dict(payload)
+        assert report.feature_alerts["feat"].is_drifted is True
+
     def test_boundary_drift(self):
         """p_value exactly at drift threshold should be drift."""
         alert = KSDriftAlert(

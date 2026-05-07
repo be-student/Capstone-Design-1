@@ -144,7 +144,7 @@ def _predict_s_learner(self, X):
 | **계산 비용** | 2배 | 1배 |
 | **권장 상황** | 처우 비율 ≥ 20%, 데이터 충분 | 처우 비율 < 20% 또는 소규모 데이터 |
 
-**실험 기반 A/B 테스트 (50:50 배정)에서는 T-Learner를 기본으로 사용합니다.**
+CLI 파이프라인은 T-Learner와 S-Learner를 모두 학습해 `results/uplift_learner_comparison.csv`에 AUUC, 평균 uplift, 양수 uplift 비율을 저장합니다. `--learner` 값이 지정되면 해당 learner를 운영 산출물에 사용하고, 두 learner의 비교 결과는 항상 남깁니다.
 
 ---
 
@@ -166,11 +166,16 @@ def _predict_s_learner(self, X):
    # 음수: 캠페인이 오히려 이탈 촉진 (Sleeping Dog)
 
 4. 4-사분면 세그먼트 분류
-   segments = model.segment_customers(uplift_scores)
+   segments = model.segment_customers(
+       uplift_scores,
+       baseline_churn_probability=churn_probability
+   )
 
 5. AUUC 평가
    auuc = model.compute_auuc(y, uplift_scores, treatment)
 ```
+
+모델 CATE가 거의 상수로 수렴하는 경우에는 시뮬레이터의 실제 treatment/control 반응 차이를 페르소나 단위로 계산해 보정한다. 이 보정은 `control churn rate - treatment churn rate`를 사용하므로 양수는 캠페인 효과, 음수는 Sleeping Dog 가능성을 뜻한다.
 
 ### 5.2 Uplift 점수 해석
 
@@ -188,13 +193,17 @@ def _predict_s_learner(self, X):
 
 ### 6.1 분류 기준
 
-중앙값(`median_uplift`)을 기준으로 양수/음수 방향으로 4분류:
+현재 구현은 Uplift Score와 baseline churn probability를 함께 사용한다.
+baseline churn probability는 ML/DL churn model의 고객별 이탈 확률이며, 없을 때만 historical churn label을 fallback으로 사용한다.
 
 ```python
-segments[scores >= max(median_uplift, 0)] = "persuadable"    # 고양성
-segments[(scores >= 0) & (scores < max(median_uplift, 0))] = "sure_thing"    # 저양성
-segments[(scores < 0) & (scores >= min(median_uplift, 0))] = "lost_cause"    # 저음성
-segments[scores < min(median_uplift, 0)] = "sleeping_dog"    # 고음성
+high_churn = baseline_churn_probability >= 0.5
+neutral = abs(uplift_scores) <= 0.05
+
+segments[uplift_scores < 0] = "sleeping_dog"
+segments[(uplift_scores > 0.05) & high_churn] = "persuadable"
+segments[neutral & ~high_churn] = "sure_thing"
+segments[neutral & high_churn] = "lost_cause"
 ```
 
 ### 6.2 4-사분면 정의와 해석
@@ -218,25 +227,25 @@ segments[scores < min(median_uplift, 0)] = "sleeping_dog"    # 고음성
 ```
 
 **Persuadables (설득 가능, ★ 핵심 타겟):**
-- Uplift 점수 ≥ max(중앙값, 0) (높은 양수)
+- Uplift 점수 > 0.05, baseline churn probability ≥ 0.5
 - 처우 없으면 이탈하지만, 처우 시 잔존 가능성 높음
 - **최우선 캠페인 대상**: 투자 대비 효과 최대
 - 특성: 이탈 위험 있으나 가격 민감도 높아 인센티브에 반응
 
 **Sure Things (확실한 잔존):**
-- Uplift 점수 0 이상 ~ 중앙값 미만 (낮은 양수)
+- |Uplift| ≤ 0.05, baseline churn probability < 0.5
 - 처우 없이도 잔존할 가능성 높음
 - **저비용 접촉만 권장**: 푸시 알림 등 최소 비용
 - 특성: 강한 브랜드 충성도, 높은 습관성 구매
 
 **Lost Causes (가망 없음):**
-- Uplift 점수 음수 ~ min(중앙값, 0) 이상 (낮은 음수)
+- |Uplift| ≤ 0.05, baseline churn probability ≥ 0.5
 - 처우해도 이탈 방지 효과 미미
 - **캠페인 제외 권장**: 예산 낭비 방지
 - 특성: 근본적인 이탈 원인(경쟁사, 가격, 품질)이 캠페인으로 해소 불가
 
 **Sleeping Dogs (역효과, 주의 필요):**
-- Uplift 점수 < min(중앙값, 0) (높은 음수)
+- Uplift 점수 < 0
 - 캠페인 노출 시 오히려 이탈 확률 증가
 - **반드시 캠페인 제외**: 접촉 자체가 해악
 - 특성: 과도한 마케팅에 피로감, 또는 이미 이탈 결심한 고객

@@ -123,7 +123,7 @@ uplift:
 
 **Module**: `src/models/clv_model.py`
 **Class**: `CLVModel`
-**Purpose**: Predict customer lifetime value using BG/NBD-inspired feature engineering with Gradient Boosting regression. Supports churn-adjusted CLV and proportional budget allocation.
+**Purpose**: Predict customer lifetime value using ML-based 12-month value regression over engineered behavior/RFM features. Supports churn-adjusted CLV and proportional budget allocation.
 
 ### API Reference
 

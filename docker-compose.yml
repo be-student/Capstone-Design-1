@@ -6,7 +6,7 @@
 #   - pipeline:   Main ML/DL training and inference pipeline
 #   - dashboard:  Streamlit dashboard (localhost:8501)
 #   - redis:      Redis for real-time scoring and caching
-#   - mlflow:     MLflow tracking server (localhost:5000)
+#   - mlflow:     MLflow tracking server (localhost:5001 on host, 5000 in container)
 #
 # Quick Start:
 #   docker compose up                          # Run everything
@@ -108,7 +108,7 @@ services:
       - REDIS_PORT=6379
       - PYTHONPATH=/app
       - PIPELINE_MODE=${PIPELINE_MODE:-all}
-      - SMALL=${SMALL:-true}
+      - SMALL=${SMALL:-false}
       - BUDGET=${BUDGET:-}
       - VERBOSE=${VERBOSE:-false}
     depends_on:

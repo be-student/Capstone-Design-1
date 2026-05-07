@@ -199,6 +199,25 @@ class TestBudgetAllocationEdgeCases:
         assert (allocation["allocated_budget"] >= 0).all()
 
 
+class TestReportingHelpers:
+    """Test holdout evaluation and reporting helpers."""
+
+    def test_evaluate_holdout_returns_metrics(self, fitted_model, rfm_data, clv_target):
+        ids = [f"C{i}" for i in range(len(rfm_data))]
+        result = fitted_model.evaluate_holdout(rfm_data, clv_target, customer_ids=ids)
+        assert "metrics" in result
+        assert "predictions" in result
+        assert "correlation" in result["metrics"]
+        assert "actual_clv" in result["predictions"].columns
+
+    def test_build_value_report_returns_top_n(self, fitted_model, rfm_data):
+        ids = [f"C{i}" for i in range(len(rfm_data))]
+        report = fitted_model.build_value_report(ids, rfm_data, top_n=15)
+        assert len(report["top_n"]) == 15
+        assert "distribution" in report
+        assert "high_value_threshold" in report["distribution"]
+
+
 # ---------------------------------------------------------------------------
 # Predict with missing engineered features
 # ---------------------------------------------------------------------------

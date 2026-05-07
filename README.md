@@ -79,7 +79,7 @@ This system goes beyond simple churn prediction. It builds a complete retention 
 │  │   Dashboard     │  │     Redis      │  │      MLflow          │      │
 │  │  (Streamlit)    │  │  (Real-time    │  │   (Experiment        │      │
 │  │  localhost:8501 │  │   Scoring &    │  │    Tracking)         │      │
-│  │                 │  │   Feature      │  │   localhost:5000     │      │
+│  │                 │  │   Feature      │  │   localhost:5001     │      │
 │  │  - Churn Dist.  │  │   Store)       │  │                      │      │
 │  │  - Cohort Curves│  │               │  │   - Metrics           │      │
 │  │  - Uplift 4-Quad│  │  localhost:    │  │   - Parameters        │      │
@@ -162,15 +162,15 @@ config/*.yaml ──→ Simulator ──→ data/raw/ ──→ Feature Engineer
 | Category | Technologies |
 |----------|-------------|
 | **Language** | Python 3.10+ |
-| **ML Models** | XGBoost, LightGBM, scikit-learn, SHAP, Optuna |
+| **ML Models** | XGBoost, LightGBM, scikit-learn, SHAP |
 | **DL Models** | PyTorch 2.0+ (LSTM, Transformer) |
 | **Uplift** | causalml or custom T-Learner/S-Learner |
-| **CLV** | lifetimes (BG/NBD + Gamma-Gamma) |
+| **CLV** | ML-based 12-month value regression with holdout validation |
 | **Optimization** | scipy.optimize / PuLP (linear programming) |
-| **Statistics** | scipy.stats, statsmodels (A/B testing, survival analysis) |
+| **Statistics** | scipy.stats (A/B testing, survival analysis) |
 | **Dashboard** | Streamlit |
 | **Experiment Tracking** | MLflow (SQLite + local artifacts) |
-| **Feature Store** | File-based (Parquet/CSV) + Redis for real-time |
+| **Feature Store** | File-based Parquet/CSV with CSV fallback; Redis for streaming components |
 | **Containerization** | Docker, Docker Compose |
 | **Caching/Streaming** | Redis |
 | **Data Processing** | pandas, numpy |
@@ -185,13 +185,7 @@ config/*.yaml ──→ Simulator ──→ data/raw/ ──→ Feature Engineer
 ```
 capstone/
 ├── config/                          # All YAML configuration files
-│   ├── base_config.yaml             # Global settings (seed, paths, churn definition)
-│   ├── simulator_config.yaml        # Persona definitions & simulation parameters
-│   ├── feature_config.yaml          # Feature engineering settings
-│   ├── model_config.yaml            # ML/DL model hyperparameters
-│   ├── uplift_config.yaml           # Uplift modeling settings
-│   ├── optimization_config.yaml     # Budget optimization parameters
-│   └── dashboard_config.yaml        # Dashboard layout settings
+│   └── simulator_config.yaml        # Personas, simulation, model, uplift, budget, dashboard settings
 │
 ├── data/                            # Data directory (generated)
 │   ├── raw/                         # Raw simulated event logs
@@ -214,43 +208,37 @@ capstone/
 │   └── ...                          # Cohort curves, uplift plots, etc.
 │
 ├── src/                             # Source code
-│   ├── main.py                      # CLI entry point (--mode train|uplift|optimize)
+│   ├── main.py                      # CLI entry point (--mode train|uplift|optimize|all)
 │   ├── data/
-│   │   ├── simulator.py             # Customer behavior simulator
-│   │   └── preprocessor.py          # Data cleaning & preparation
+│   │   ├── generator.py             # Customer behavior simulator
+│   │   ├── orchestrator.py          # End-to-end simulation runner
+│   │   └── preprocessing.py         # Data cleaning & preparation
 │   ├── features/
-│   │   ├── engineer.py              # Feature engineering pipeline
-│   │   └── store.py                 # Feature store (file + Redis)
+│   │   ├── feature_engineering.py   # Feature engineering pipeline and feature store export
+│   │   └── segmentation.py          # RFM and churn/uplift/CLV segmentation
 │   ├── models/
-│   │   ├── ml_models.py             # XGBoost, LightGBM training & evaluation
-│   │   ├── dl_models.py             # LSTM/Transformer PyTorch models
-│   │   └── ensemble.py              # Weighted ensemble (0.6 ML + 0.4 DL)
-│   ├── uplift/
+│   │   ├── churn_model.py           # XGBoost, LightGBM training & evaluation
+│   │   ├── dl_trainer.py            # LSTM/Transformer training
+│   │   ├── sequence_utils.py        # Real sequence and pseudo-sequence preprocessing
 │   │   ├── uplift_model.py          # T-Learner, S-Learner implementation
-│   │   └── segmentation.py          # 4-quadrant & 6-segment classification
-│   ├── clv/
-│   │   └── clv_predictor.py         # CLV estimation (BG/NBD + Gamma-Gamma)
+│   │   ├── clv_model.py             # ML-based 12-month CLV prediction
+│   │   ├── survival_model.py        # Cox PH survival model
+│   │   └── recommendations.py       # Personalized retention recommendations
 │   ├── optimization/
 │   │   └── budget_optimizer.py      # LP-based budget allocation
-│   ├── ab_testing/
-│   │   └── ab_analyzer.py           # Power analysis, significance testing
-│   ├── monitoring/
-│   │   └── drift_detector.py        # PSI/KS data drift detection
 │   ├── analysis/
+│   │   ├── ab_testing.py            # Analysis utilities
 │   │   └── cohort_analysis.py       # Cohort retention & journey analysis
+│   ├── monitoring/
+│   │   ├── drift_detection.py       # PSI data drift detection
+│   │   ├── ks_drift.py              # KS-test drift detection
+│   │   └── monitoring_service.py    # Monitoring report serialization
 │   ├── streaming/
-│   │   └── realtime_scorer.py       # Redis-backed real-time scoring
-│   ├── survival/
-│   │   └── survival_analysis.py     # Kaplan-Meier & Cox PH models
-│   ├── recommendations/
-│   │   └── recommender.py           # Personalized retention recommendations
-│   └── utils/
-│       ├── config_loader.py         # YAML config loading utilities
-│       ├── logger.py                # Logging setup
-│       └── pipeline_state.py        # Checkpoint management (pipeline_state.json)
-│
-├── dashboard/
-│   └── app.py                       # Streamlit dashboard application
+│   │   ├── redis_producer.py        # Redis stream producer
+│   │   └── redis_consumer.py        # Redis stream consumer
+│   └── pipeline/
+│       ├── runner.py                # 16-stage checkpointed pipeline
+│       └── pipeline_state.py        # Checkpoint management
 │
 ├── tests/                           # TDD test suite
 │   ├── test_simulator.py
@@ -293,7 +281,7 @@ docker-compose up --build
 open http://localhost:8501
 
 # Access MLflow UI
-open http://localhost:5000
+open http://localhost:5001
 ```
 
 ### Option 2: Local Development
@@ -317,7 +305,7 @@ python src/main.py --mode uplift
 python src/main.py --mode optimize --budget 50000000
 
 # Launch dashboard
-streamlit run dashboard/app.py --server.port 8501
+streamlit run src/dashboard/app.py --server.port 8501
 ```
 
 ---
@@ -342,9 +330,7 @@ streamlit run dashboard/app.py --server.port 8501
 2. **Configure parameters** (optional — sensible defaults are provided):
    ```bash
    # Edit configuration files in config/ directory
-   vim config/base_config.yaml        # Seed, paths, churn definition
-   vim config/simulator_config.yaml   # Customer count, persona weights
-   vim config/model_config.yaml       # Hyperparameters, ensemble weights
+   vim config/simulator_config.yaml   # Simulation, churn definition, models, budget
    ```
 
 3. **Verify setup:**
@@ -367,7 +353,7 @@ streamlit run dashboard/app.py --server.port 8501
 | `pipeline` | ML/DL training, data generation, optimization | — | Python 3.10-slim |
 | `dashboard` | Streamlit interactive dashboard | 8501 | Python 3.10-slim |
 | `redis` | Real-time feature store & streaming scoring | 6379 | redis:7-alpine |
-| `mlflow` | Experiment tracking server | 5000 | Python 3.10-slim |
+| `mlflow` | Experiment tracking server | 5001 host / 5000 container | Python 3.10-slim |
 
 ### Commands
 
@@ -483,20 +469,7 @@ All parameters are managed via YAML files in the `config/` directory.
 
 ### Key Configuration Parameters
 
-**`config/base_config.yaml`** — Global settings:
-```yaml
-random_seed: 42
-churn_definition:
-  no_purchase_days: 30      # Days without purchase to flag churn
-  no_login_days: 60         # Days without login to flag churn
-paths:
-  data_raw: data/raw/
-  data_features: data/features/
-  models: models/
-  results: results/
-```
-
-**`config/simulator_config.yaml`** — Simulation parameters:
+**`config/simulator_config.yaml`** — Simulation, model, uplift, budget, monitoring, and dashboard parameters:
 ```yaml
 num_customers: 20000         # Total customers (small mode: 5000)
 simulation_months: 12        # Duration (small mode: 6)
@@ -511,22 +484,22 @@ treatment_ratio: 0.5         # 50% treatment, 50% control
 target_churn_rate: [0.15, 0.25]  # 15-25% churn rate range
 ```
 
-**`config/model_config.yaml`** — Model parameters:
+Model, pipeline, and optimization parameters are defined in the same `config/simulator_config.yaml` file:
 ```yaml
-train_test_split:
+pipeline:
   method: time_based
   train_months: 10
   test_months: 2
 ensemble:
   ml_weight: 0.6
   dl_weight: 0.4
-optimization:
-  default_budget: 50000000   # 50M KRW
+budget:
+  total_krw: 50000000   # 50M KRW
 ```
 
 ### Reproducibility
 
-Setting the same `random_seed` in `config/base_config.yaml` guarantees identical results across runs (same data generation, train/test splits, model initialization, etc.).
+Setting the same `random_seed` in `config/simulator_config.yaml` guarantees repeatable data generation, train/test splits, and model initialization.
 
 ---
 

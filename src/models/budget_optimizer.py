@@ -19,13 +19,15 @@ Since linprog *minimizes*, we negate the objective coefficients.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import linprog, LinearConstraint
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_WHATIF_MULTIPLIERS = (0.5, 1.0, 2.0)
 
 
 class BudgetOptimizer:
@@ -175,24 +177,11 @@ class BudgetOptimizer:
         A_ub = np.ones((1, n))
         b_ub = np.array([total_budget])
 
-        # Variable bounds: 0 ≤ x_i ≤ upper_i
-        # Upper bound is cost_per_action when budget is tight (ensuring
-        # each customer gets at most one treatment). When total budget
-        # exceeds total treatable cost, we relax upper bounds to allow
-        # higher allocation to high-priority customers (e.g. premium
-        # treatments, multiple touchpoints).
-        total_treatable = np.sum(cost_per_action[priority > 0])
-        if total_budget > total_treatable and total_treatable > 0:
-            # Relax upper bounds proportionally to priority
-            max_priority = priority.max() if priority.max() > 0 else 1.0
-            scale = total_budget / total_treatable
-            upper = np.where(
-                priority > 0,
-                cost_per_action * scale * (priority / max_priority + 1.0),
-                0.0,
-            )
-        else:
-            upper = cost_per_action.copy()
+        # Variable bounds: 0 ≤ x_i ≤ cost_per_action_i. This keeps the
+        # assignment aligned with the requirement's binary Action_i decision:
+        # each customer can receive at most one configured intervention.
+        positive_priority = priority > 0
+        upper = np.where(positive_priority, cost_per_action, 0.0)
         bounds = [(0.0, max(float(u), 0.0)) for u in upper]
 
         # Solve LP using HiGHS solver (default in modern scipy)
@@ -209,6 +198,14 @@ class BudgetOptimizer:
 
             if result.success:
                 allocated = np.maximum(result.x, 0.0)
+                allocated = self._assign_residual_high_value_budget(
+                    allocated=allocated,
+                    clv=clv,
+                    uplift=uplift,
+                    churn_prob=churn_prob,
+                    cost_per_action=cost_per_action,
+                    total_budget=total_budget,
+                )
                 logger.info(
                     "LP solved successfully: status=%s, total_allocated=%.0f KRW",
                     result.message,
@@ -226,6 +223,44 @@ class BudgetOptimizer:
         except Exception as exc:
             logger.error("LP solver error: %s. Falling back to proportional.", exc)
             return self._proportional_fallback(priority, cost_per_action, total_budget)
+
+    def _assign_residual_high_value_budget(
+        self,
+        allocated: np.ndarray,
+        clv: np.ndarray,
+        uplift: np.ndarray,
+        churn_prob: np.ndarray,
+        cost_per_action: np.ndarray,
+        total_budget: float,
+    ) -> np.ndarray:
+        """Use leftover budget for high-value customers after positive uplift is funded."""
+        leftover = float(total_budget - allocated.sum())
+        if leftover <= 1e-6 or len(allocated) == 0:
+            return allocated
+        if not (uplift > 0).any():
+            return allocated
+
+        clv_cut = float(np.median(clv))
+        uplift_floor = float(np.quantile(uplift, 0.10))
+        remaining_capacity = np.maximum(cost_per_action - allocated, 0.0)
+        candidates = np.where(
+            (remaining_capacity > 0)
+            & (clv >= clv_cut)
+            & (churn_prob > 0)
+            & (uplift >= uplift_floor)
+        )[0]
+        if len(candidates) == 0:
+            return allocated
+
+        ordered = candidates[np.argsort(-clv[candidates])]
+        adjusted = allocated.copy()
+        for idx in ordered:
+            if leftover <= 1e-6:
+                break
+            add = min(float(remaining_capacity[idx]), leftover)
+            adjusted[idx] += add
+            leftover -= add
+        return adjusted
 
     # ------------------------------------------------------------------
     # Multi-channel LP optimisation
@@ -363,6 +398,35 @@ class BudgetOptimizer:
     # ------------------------------------------------------------------
     # What-If Scenario Analysis
     # ------------------------------------------------------------------
+    def enrich_allocation_metrics(
+        self,
+        allocation: pd.DataFrame,
+        data: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """Attach dashboard-friendly business metrics to an allocation.
+
+        Returns retained value, expected revenue saved, and ROI from the
+        current allocation. ``expected_revenue_saved`` aliases the retained
+        value so downstream consumers can render business-facing wording
+        without re-computing it.
+        """
+        total_allocated = float(allocation["allocated_budget"].sum())
+        retained_value = self.compute_roi(allocation=allocation, data=data)
+        expected_revenue_saved = retained_value
+        roi = (
+            expected_revenue_saved / total_allocated
+            if total_allocated > 0
+            else 0.0
+        )
+        customers_treated = int((allocation["allocated_budget"] > 0).sum())
+        return {
+            "total_allocated": total_allocated,
+            "retained_value": retained_value,
+            "expected_revenue_saved": expected_revenue_saved,
+            "roi": roi,
+            "customers_treated": customers_treated,
+        }
+
     def simulate_scenario(
         self,
         data: pd.DataFrame,
@@ -417,16 +481,10 @@ class BudgetOptimizer:
             total_budget=total_budget,
         )
 
-        # Compute metrics
-        total_allocated = float(allocation["allocated_budget"].sum())
-        retained_value = self.compute_roi(
+        metrics = self.enrich_allocation_metrics(
             allocation=allocation,
             data=scenario_data,
         )
-
-        customers_treated = int((allocation["allocated_budget"] > 0).sum())
-
-        efficiency = retained_value / total_allocated if total_allocated > 0 else 0.0
 
         return {
             "scenario_name": scenario_name,
@@ -438,10 +496,7 @@ class BudgetOptimizer:
                 "clv_multiplier": clv_multiplier,
             },
             "total_budget": total_budget,
-            "total_allocated": total_allocated,
-            "retained_value": retained_value,
-            "roi": efficiency,
-            "customers_treated": customers_treated,
+            **metrics,
             "allocation": allocation,
         }
 
@@ -633,6 +688,27 @@ class BudgetOptimizer:
 
         return pd.DataFrame(rows)
 
+    def run_budget_sweep(
+        self,
+        data: pd.DataFrame,
+        budget_levels: Optional[List[float]] = None,
+    ) -> pd.DataFrame:
+        """Run the standard budget what-if sweep.
+
+        Defaults to 50/100/200% of the configured budget to match the
+        dashboard and requirements document.
+        """
+        if budget_levels is None:
+            budget_levels = [
+                self.total_budget * multiplier
+                for multiplier in DEFAULT_WHATIF_MULTIPLIERS
+            ]
+        return self.vary_parameter(
+            data=data,
+            parameter="budget",
+            values=budget_levels,
+        )
+
     # ------------------------------------------------------------------
     # Alias
     # ------------------------------------------------------------------
@@ -682,6 +758,7 @@ class BudgetOptimizer:
         # Fraction of treatment applied
         with np.errstate(divide="ignore", invalid="ignore"):
             fraction = np.where(cost > 0, alloc / cost, 0.0)
+        fraction = np.clip(fraction, 0.0, 1.0)
 
         clv = merged["clv"].values.astype(float)
         uplift = merged["uplift_score"].values.astype(float)

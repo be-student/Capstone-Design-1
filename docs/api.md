@@ -125,7 +125,7 @@ loaded = UpliftModel.load("models/uplift_model.pkl")
 
 **Module:** `src.models.clv_model`
 
-Customer Lifetime Value prediction using BG/NBD-inspired approach with gradient boosting. Supports churn-adjusted CLV and proportional budget allocation.
+Customer Lifetime Value prediction using ML-based 12-month value regression with gradient boosting. Supports churn-adjusted CLV and proportional budget allocation.
 
 ### Class: `CLVModel`
 

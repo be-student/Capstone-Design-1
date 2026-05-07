@@ -145,6 +145,24 @@ class TestSegmentationEdgeCases:
         segments = model.segment_customers(scores)
         assert len(segments) == 1
 
+    def test_segment_with_baseline_churn_probability(self, config):
+        """Optional churn axis should produce 4-quadrant semantics."""
+        model = UpliftModel(config)
+        scores = np.array([0.2, 0.01, 0.0, -0.1])
+        churn = np.array([0.8, 0.2, 0.9, 0.7])
+        segments = model.segment_customers(scores, baseline_churn_probability=churn)
+        assert list(segments) == [
+            "persuadable", "sure_thing", "lost_cause", "sleeping_dog"
+        ]
+
+    def test_compare_learners_returns_both_rows(self, config, simple_data):
+        """Helper should make T/S-learner comparison easy."""
+        X, treatment, y = simple_data
+        model = UpliftModel(config)
+        comparison = model.compare_learners(X, treatment, y)
+        assert set(comparison["learner"]) >= {"t_learner", "s_learner"}
+        assert "auuc" in comparison.columns
+
 
 # ---------------------------------------------------------------------------
 # AUUC edge cases

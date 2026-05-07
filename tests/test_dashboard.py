@@ -24,6 +24,7 @@ Tests cover:
 
 import os
 import sys
+import json
 import pytest
 import numpy as np
 import pandas as pd
@@ -230,6 +231,99 @@ class TestDashboardDataLoaderInterface:
         """Must implement CLV data loading."""
         assert hasattr(dashboard_data_loader, "load_clv_data")
         assert callable(dashboard_data_loader.load_clv_data)
+
+    def test_has_metric_history_loaders(self, dashboard_data_loader):
+        assert callable(dashboard_data_loader.load_auc_history)
+        assert callable(dashboard_data_loader.load_precision_history)
+        assert callable(dashboard_data_loader.load_recall_history)
+
+
+class TestDashboardArtifactAdapters:
+    def test_load_budget_results_reads_results_dir(self, tmp_path, config):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir = tmp_path / "results"
+        artifacts_dir.mkdir()
+        results_dir.mkdir()
+        pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "allocated_budget": [1000, 2000],
+            "retained_value": [5000, 8000],
+        }).to_csv(results_dir / "budget_optimization.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {
+            "artifacts_dir": str(artifacts_dir),
+            "results_dir": str(results_dir),
+        }
+        loader = DashboardDataLoader(cfg)
+        df = loader.load_budget_results()
+        assert "allocated_budget_krw" in df.columns
+        assert "expected_revenue_saved_krw" in df.columns
+
+    def test_load_ab_test_detailed_prefers_real_schema(self, tmp_path, config):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        payload = {
+            "experiments": [{
+                "name": "email",
+                "treatment_churn_rate": 0.1,
+                "control_churn_rate": 0.2,
+                "lift": -0.5,
+                "p_value": 0.01,
+                "is_significant": True,
+                "confidence_interval": [-0.12, -0.05],
+                "effect_size_cohens_h": 0.2,
+                "power": 0.8,
+                "alpha": 0.05,
+                "treatment_size": 100,
+                "control_size": 100,
+            }],
+            "summary": {"total_experiments": 1, "significant_count": 1},
+        }
+        with open(artifacts_dir / "ab_test_detailed.json", "w") as f:
+            json.dump(payload, f)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"artifacts_dir": str(artifacts_dir)}
+        loader = DashboardDataLoader(cfg)
+        detail = loader.load_ab_test_detailed()
+        assert detail["experiments"][0]["name"] == "email"
+
+    def test_load_drift_history_from_monitoring_report(self, tmp_path, config):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        report = {
+            "timestamp": "2026-05-07T00:00:00Z",
+            "overall_alert_level": "yellow",
+            "drifted_features": ["feat_a"],
+            "psi_report": {
+                "feature_alerts": {
+                    "feat_a": {"psi_value": 0.2},
+                    "feat_b": {"psi_value": 0.1},
+                }
+            },
+            "ks_report": {
+                "feature_alerts": {
+                    "feat_a": {"statistic": 0.3},
+                    "feat_b": {"statistic": 0.1},
+                }
+            },
+        }
+        with open(results_dir / "monitoring_report.json", "w") as f:
+            json.dump(report, f)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        history = loader.load_drift_history()
+        assert history.iloc[0]["alert_level"] == "yellow"
+        assert history.iloc[0]["num_drifted_features"] == 1
 
 
 # ---------------------------------------------------------------------------

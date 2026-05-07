@@ -255,3 +255,23 @@ OMP_NUM_THREADS=1 LIGHTGBM_NUM_THREADS=1 /tmp/capstone-codex-py312/bin/python -m
 
 단, 위 테스트 통과는 현재 6-agent 검증에서 발견한 artifact completeness, small/full evidence, recommendation no-action, dashboard fallback 문제를 자동으로 보증하지 않는다.
 
+## 후속 구현 반영 상태
+
+`issue_final_v2.md` 작성 및 커밋 이후, 위 FAIL 항목 중 코드와 small-mode artifact에서 즉시 검증 가능한 항목을 보강했다.
+
+반영 위치:
+- Cohort/journey: `src/analysis/cohort_analysis.py`, `src/main.py::run_cohort`
+- Recommendation no-action: `src/models/recommendations.py`, `src/main.py::run_recommend`
+- Pipeline cache/resume 및 checklist validation: `src/main.py::_compute_features`, `src/main.py::run_all`, `src/main.py::_write_artifact_checklist`
+- Dashboard performance history/fallback: `src/dashboard/data_loader.py`
+- 반영 기록: `docs/requirement_traceability.md`
+
+현재 focused evidence:
+- `results/required_artifacts_checklist.json`: `25 / 25`, `missing: []`
+- `results/cohort_milestones.csv`: M1/M3/M6/M12 populated
+- `results/churn_last30_sequences.json`: top-5 sequence patterns populated
+- `results/recommendations.csv`: no-action 대상 고객의 active recommendation 위반 `0`
+- Targeted tests: recommendations `33 passed`, dashboard/streamlit/pipeline `319 passed`, main/CLI/pipeline `162 passed`, budget/drift/monitoring `172 passed`
+
+남는 제출 리스크:
+- 현재 생성 산출물은 여전히 small-mode evidence다. full-mode 20,000명/12개월/10,000+ treatment-control 증명은 최종 제출 직전 별도 clean full run으로 확인해야 한다.

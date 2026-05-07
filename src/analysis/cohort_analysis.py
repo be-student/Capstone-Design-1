@@ -56,6 +56,30 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
+def _normalize_event_schema(events_df: pd.DataFrame) -> pd.DataFrame:
+    """Return event data with canonical columns used by cohort helpers."""
+    events = events_df.copy()
+    if "event_date" not in events.columns:
+        for candidate in ("timestamp", "event_timestamp", "date"):
+            if candidate in events.columns:
+                events["event_date"] = pd.to_datetime(events[candidate]).dt.normalize()
+                break
+    if "event_type" not in events.columns:
+        for candidate in ("event_name", "type", "activity", "event"):
+            if candidate in events.columns:
+                events["event_type"] = events[candidate]
+                break
+    missing = {"customer_id", "event_date", "event_type"} - set(events.columns)
+    if missing:
+        raise KeyError(
+            "Event data missing required cohort columns: "
+            + ", ".join(sorted(missing))
+        )
+    events["event_date"] = pd.to_datetime(events["event_date"])
+    events["event_type"] = events["event_type"].astype(str)
+    return events
+
+
 class CohortAnalyzer:
     """Cohort analysis for customer lifecycle and retention tracking.
 
@@ -141,24 +165,41 @@ class CohortAnalyzer:
         Returns:
             DataFrame with cohort and cohort_period columns added.
         """
-        # Find each customer's first event date
-        first_event = (
-            data.groupby(customer_col)[date_col]
-            .min()
-            .reset_index()
-            .rename(columns={date_col: "first_event_date"})
-        )
+        use_signup_date = "signup_date" in data.columns
+
+        if use_signup_date:
+            first_event = (
+                data[[customer_col, "signup_date"]]
+                .dropna(subset=["signup_date"])
+                .drop_duplicates(customer_col)
+                .rename(columns={"signup_date": "first_event_date"})
+            )
+            first_event["first_event_date"] = pd.to_datetime(
+                first_event["first_event_date"]
+            )
+        else:
+            first_event = (
+                data.groupby(customer_col)[date_col]
+                .min()
+                .reset_index()
+                .rename(columns={date_col: "first_event_date"})
+            )
 
         result = data.merge(first_event, on=customer_col, how="left")
 
         # Cohort = year-month of first event
         result["cohort"] = result["first_event_date"].dt.to_period("M").astype(str)
 
-        # Period index = months since cohort start
-        result["cohort_period"] = (
-            result[date_col].dt.to_period("M").astype("int64")
-            - result["first_event_date"].dt.to_period("M").astype("int64")
-        )
+        if use_signup_date:
+            result["cohort_period"] = (
+                (result[date_col] - result["first_event_date"]).dt.days // 30
+            ).clip(lower=0)
+        else:
+            # Period index = calendar months since cohort start
+            result["cohort_period"] = (
+                result[date_col].dt.to_period("M").astype("int64")
+                - result["first_event_date"].dt.to_period("M").astype("int64")
+            )
 
         result = result.drop(columns=["first_event_date"])
         return result
@@ -179,12 +220,23 @@ class CohortAnalyzer:
         Returns:
             DataFrame with cohort and cohort_period columns added.
         """
-        first_event = (
-            data.groupby(customer_col)[date_col]
-            .min()
-            .reset_index()
-            .rename(columns={date_col: "first_event_date"})
-        )
+        if "signup_date" in data.columns:
+            first_event = (
+                data[[customer_col, "signup_date"]]
+                .dropna(subset=["signup_date"])
+                .drop_duplicates(customer_col)
+                .rename(columns={"signup_date": "first_event_date"})
+            )
+            first_event["first_event_date"] = pd.to_datetime(
+                first_event["first_event_date"]
+            )
+        else:
+            first_event = (
+                data.groupby(customer_col)[date_col]
+                .min()
+                .reset_index()
+                .rename(columns={date_col: "first_event_date"})
+            )
 
         result = data.merge(first_event, on=customer_col, how="left")
 
@@ -624,6 +676,69 @@ class CohortAnalyzer:
             churn[0] = 0.0
         return churn
 
+    def extract_retention_milestones(
+        self,
+        retention_matrix: pd.DataFrame,
+        milestones: Optional[List[int]] = None,
+        include_m0: bool = True,
+    ) -> pd.DataFrame:
+        """Extract M1/M3/M6/M12 retention with latest-observed fallback.
+
+        Exact milestone columns are used when present. For short observation
+        windows, the most recent available period before the requested
+        milestone is carried forward so required reporting columns are still
+        populated and auditable instead of silently becoming all-null.
+        """
+        milestone_periods = list(milestones or [1, 3, 6, 12])
+        selected_periods = ([0] if include_m0 else []) + milestone_periods
+        available_periods = sorted(
+            int(c) for c in retention_matrix.columns if isinstance(c, (int, np.integer))
+        )
+
+        data: Dict[str, pd.Series] = {}
+        for period in selected_periods:
+            label = f"M{period}"
+            if period in retention_matrix.columns:
+                data[label] = retention_matrix[period].astype(float)
+            else:
+                fallback_periods = [p for p in available_periods if p <= period]
+                if fallback_periods:
+                    data[label] = retention_matrix[fallback_periods[-1]].astype(float)
+                else:
+                    data[label] = pd.Series(
+                        np.nan, index=retention_matrix.index, dtype=float
+                    )
+
+        milestone_df = pd.DataFrame(data, index=retention_matrix.index)
+        milestone_df.index.name = retention_matrix.index.name
+        return milestone_df
+
+    def analyze_churn_signals(
+        self,
+        customers_df: pd.DataFrame,
+        events_df: pd.DataFrame,
+        n_days: int = 30,
+        top_n: int = 5,
+    ) -> Dict[str, Any]:
+        """Bundle reusable churn-signal outputs for downstream reporting."""
+        return {
+            "top_sequences": extract_churn_sequences(
+                events_df=events_df,
+                customers_df=customers_df,
+                n_days=n_days,
+                top_n=top_n,
+            ),
+            "pre_churn_events": analyze_pre_churn_events(
+                events_df=events_df,
+                customers_df=customers_df,
+                n_days=n_days,
+            ),
+            "journey_funnel": compute_journey_funnel(
+                customers_df=customers_df,
+                events_df=events_df,
+            ),
+        }
+
     def compute_cumulative_revenue(
         self,
         cohort_data: pd.DataFrame,
@@ -897,6 +1012,9 @@ class CohortAnalyzer:
             "retention_curves": retention_curves,
             "avg_retention_curve": avg_curve,
             "churn_rates": churn_rates,
+            "milestone_retention": self.extract_retention_milestones(
+                retention_matrix
+            ),
             "half_life": half_life,
             "summary": summary,
             "metrics": metrics,
@@ -930,8 +1048,7 @@ def extract_churn_sequences(
         most common pre-churn event sequences, ordered by descending
         frequency.
     """
-    events = events_df.copy()
-    events["event_date"] = pd.to_datetime(events["event_date"])
+    events = _normalize_event_schema(events_df)
 
     churned_ids = customers_df.loc[
         customers_df["churn_label"] == 1, "customer_id"
@@ -985,8 +1102,7 @@ def analyze_pre_churn_events(
         - ``freq_ratio``: ``churned_freq / active_freq`` (NaN when
           ``active_freq`` is 0).
     """
-    events = events_df.copy()
-    events["event_date"] = pd.to_datetime(events["event_date"])
+    events = _normalize_event_schema(events_df)
 
     churn_map = customers_df.set_index("customer_id")["churn_label"]
 
@@ -1060,7 +1176,8 @@ def compute_journey_funnel(
         - ``drop_off_rate``: Fraction of customers who did *not* proceed from
           the previous stage to this one (0.0 for the Signup stage).
     """
-    purchases = events_df[events_df["event_type"] == "purchase"]
+    events = _normalize_event_schema(events_df)
+    purchases = events[events["event_type"] == "purchase"]
     purchase_counts = purchases.groupby("customer_id").size()
 
     all_customers = set(customers_df["customer_id"])

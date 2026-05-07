@@ -18,7 +18,7 @@ import json
 import pickle
 import logging
 from pathlib import Path
-from typing import Union, Optional, Sequence
+from typing import Any, Dict, Union, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -230,6 +230,72 @@ class CLVModel:
             "customer_id": np.asarray(customer_ids),
             "allocated_budget": allocated,
         })
+
+    def evaluate_holdout(
+        self,
+        X_holdout: pd.DataFrame,
+        y_holdout: Union[pd.Series, np.ndarray],
+        customer_ids: Optional[Sequence[str]] = None,
+        top_n: int = 20,
+    ) -> Dict[str, Any]:
+        """Compare actual vs predicted CLV on a holdout set."""
+        actual = np.asarray(y_holdout, dtype=np.float64)
+        predicted = self.predict(X_holdout)
+
+        if len(actual) > 1 and np.std(actual) > 0 and np.std(predicted) > 0:
+            correlation = float(np.corrcoef(actual, predicted)[0, 1])
+        else:
+            correlation = 0.0
+
+        mae = float(np.mean(np.abs(actual - predicted)))
+        rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
+
+        report = pd.DataFrame({
+            "customer_id": np.asarray(customer_ids) if customer_ids is not None
+            else np.arange(len(predicted)),
+            "actual_clv": actual,
+            "predicted_clv": predicted,
+            "absolute_error": np.abs(actual - predicted),
+        }).sort_values("predicted_clv", ascending=False).reset_index(drop=True)
+
+        return {
+            "metrics": {
+                "mae": mae,
+                "rmse": rmse,
+                "correlation": correlation,
+            },
+            "predictions": report,
+            "top_n": report.head(top_n).copy(),
+        }
+
+    def build_value_report(
+        self,
+        customer_ids: Sequence[str],
+        X: pd.DataFrame,
+        top_n: int = 20,
+        high_value_quantile: float = 0.8,
+    ) -> Dict[str, Any]:
+        """Return ranking and distribution helpers for downstream reporting."""
+        ranked = self.rank_customers(customer_ids, X)
+        threshold = float(ranked["predicted_clv"].quantile(high_value_quantile))
+        ranked["high_value"] = ranked["predicted_clv"] >= threshold
+
+        distribution = {
+            "count": int(len(ranked)),
+            "mean": float(ranked["predicted_clv"].mean()),
+            "median": float(ranked["predicted_clv"].median()),
+            "p80": float(ranked["predicted_clv"].quantile(0.8)),
+            "p90": float(ranked["predicted_clv"].quantile(0.9)),
+            "p95": float(ranked["predicted_clv"].quantile(0.95)),
+            "high_value_threshold": threshold,
+            "high_value_count": int(ranked["high_value"].sum()),
+        }
+
+        return {
+            "ranking": ranked,
+            "top_n": ranked.head(top_n).copy(),
+            "distribution": distribution,
+        }
 
     # ------------------------------------------------------------------
     # Persistence

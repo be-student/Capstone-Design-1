@@ -182,6 +182,26 @@ class TestSingleChannelSolve:
         agg = optimizer.get_customer_allocations(result)
         assert agg["allocated_budget"].sum() <= budget * 1.001
 
+    def test_summarize_result_metrics_contains_expected_revenue(
+        self, optimizer, sample_data,
+    ):
+        result = optimizer.solve(sample_data, total_budget=5_000_000)
+        metrics = optimizer.summarize_result_metrics(result, sample_data)
+        assert "expected_revenue_saved" in metrics
+        assert metrics["expected_revenue_saved"] == pytest.approx(
+            metrics["retained_value"]
+        )
+
+    def test_default_budget_sweep_uses_200_percent_cap(
+        self, optimizer, sample_data,
+    ):
+        sweep = optimizer.run_budget_sweep(sample_data)
+        assert sweep["total_budget"].tolist() == [
+            optimizer.total_budget * 0.5,
+            optimizer.total_budget,
+            optimizer.total_budget * 2.0,
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Multi-channel constraint tests

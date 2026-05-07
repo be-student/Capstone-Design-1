@@ -109,6 +109,13 @@ _DEFAULT_ACTIONS: List[Dict[str, Any]] = [
             "explorer": 0.9,
         },
     },
+    {
+        "action_type": "no_action",
+        "base_cost": 0,
+        "description": "No retention action",
+        "channel": None,
+        "segment_affinity": {},
+    },
 ]
 
 # ── Reason templates ──────────────────────────────────────────────────────────
@@ -120,6 +127,7 @@ _REASON_TEMPLATES: Dict[str, str] = {
     "loyalty_points": "Loyalty points reward for '{segment}' customer to reinforce retention.",
     "personal_outreach": "High-touch outreach for '{segment}' customer with CLV={clv:,.0f} KRW and churn risk {churn:.0%}.",
     "exclusive_offer": "Exclusive offer targeting '{segment}' segment with uplift score {uplift:.2f}.",
+    "no_action": "No action: customer has non-positive uplift or is classified as a sleeping dog.",
 }
 
 
@@ -167,7 +175,12 @@ class RecommendationEngine:
         """Return list of available retention action type names."""
         return [a["action_type"] for a in self.actions]
 
-    def recommend(self, *, data: pd.DataFrame) -> pd.DataFrame:
+    def recommend(
+        self,
+        *,
+        data: pd.DataFrame,
+        include_context: bool = False,
+    ) -> pd.DataFrame:
         """Generate the single best recommendation per customer.
 
         Parameters
@@ -189,16 +202,33 @@ class RecommendationEngine:
         # For each customer pick the highest-scoring action
         idx = scores_df.groupby("customer_id")["score"].idxmax()
         best = scores_df.loc[idx].reset_index(drop=True)
+        best = self._apply_no_action_policy(best, data)
 
         # Attach explanations
         best["reason"] = best.apply(
             lambda r: self._build_reason(r, data), axis=1,
         )
+        if include_context:
+            best = self._attach_decision_context(best, data)
+            columns = [
+                "customer_id", "action_type", "recommendation_type", "score",
+                "estimated_cost", "reason", "segment", "uplift_segment",
+                "uplift_score", "clv", "churn_probability", "priority_score",
+                "expected_revenue_saved", "expected_roi", "recommended_offer",
+                "expected_uplift",
+            ]
+            return best[columns]
 
-        return best[["customer_id", "action_type", "score", "estimated_cost", "reason"]]
+        return best[[
+            "customer_id", "action_type", "score", "estimated_cost", "reason"
+        ]]
 
     def recommend_top_k(
-        self, *, data: pd.DataFrame, k: int = 3,
+        self,
+        *,
+        data: pd.DataFrame,
+        k: int = 3,
+        include_context: bool = False,
     ) -> pd.DataFrame:
         """Return top-*k* recommendations per customer, sorted by score.
 
@@ -221,12 +251,35 @@ class RecommendationEngine:
             ["customer_id", "score"], ascending=[True, False],
         )
         top_k = scores_df.groupby("customer_id").head(k).reset_index(drop=True)
+        no_action_ids = set(
+            data.loc[self._no_action_mask(data), "customer_id"].astype(str)
+        )
+        if no_action_ids:
+            top_k = top_k[~top_k["customer_id"].astype(str).isin(no_action_ids)]
+            no_action_rows = pd.DataFrame({
+                "customer_id": list(no_action_ids),
+                "action_type": "no_action",
+                "score": 0.0,
+                "estimated_cost": 0.0,
+            })
+            top_k = pd.concat([top_k, no_action_rows], ignore_index=True)
 
         top_k["reason"] = top_k.apply(
             lambda r: self._build_reason(r, data), axis=1,
         )
+        if include_context:
+            top_k = self._attach_decision_context(top_k, data)
+            return top_k[[
+                "customer_id", "action_type", "recommendation_type", "score",
+                "estimated_cost", "reason", "segment", "uplift_segment",
+                "uplift_score", "clv", "churn_probability", "priority_score",
+                "expected_revenue_saved", "expected_roi", "recommended_offer",
+                "expected_uplift",
+            ]]
 
-        return top_k[["customer_id", "action_type", "score", "estimated_cost", "reason"]]
+        return top_k[[
+            "customer_id", "action_type", "score", "estimated_cost", "reason"
+        ]]
 
     # ── Persistence ───────────────────────────────────────────────────────
 
@@ -318,6 +371,8 @@ class RecommendationEngine:
 
             for action in self.actions:
                 atype = action["action_type"]
+                if atype == "no_action":
+                    continue
 
                 # ── Hard channel filter ───────────────────────────────
                 if action.get("channel") == "push" and not push_ok:
@@ -356,12 +411,87 @@ class RecommendationEngine:
 
         return pd.DataFrame(records)
 
+    def _no_action_mask(self, data: pd.DataFrame) -> pd.Series:
+        """Identify customers where retention intervention should be skipped."""
+        uplift = data.get("uplift_score", pd.Series(0.0, index=data.index)).astype(float)
+        mask = uplift <= 0
+        for col in ("segment", "uplift_segment"):
+            if col in data.columns:
+                mask = mask | data[col].astype(str).str.contains(
+                    "sleeping_dog", case=False, na=False
+                )
+        return mask
+
+    def _apply_no_action_policy(
+        self,
+        recommendations: pd.DataFrame,
+        data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Force no-action outputs for sleeping dogs and non-positive uplift."""
+        adjusted = recommendations.copy()
+        data_indexed = data.copy()
+        data_indexed["customer_id"] = data_indexed["customer_id"].astype(str)
+        no_action_ids = set(
+            data_indexed.loc[self._no_action_mask(data_indexed), "customer_id"]
+        )
+        mask = adjusted["customer_id"].astype(str).isin(no_action_ids)
+        adjusted.loc[mask, "action_type"] = "no_action"
+        adjusted.loc[mask, "score"] = 0.0
+        adjusted.loc[mask, "estimated_cost"] = 0.0
+        return adjusted
+
+    def _attach_decision_context(
+        self,
+        recommendations: pd.DataFrame,
+        data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Attach model context required for final retention decisions."""
+        context_cols = [
+            c for c in [
+                "customer_id", "segment", "uplift_segment", "uplift_score",
+                "clv", "churn_prob", "churn_probability", "priority_score",
+            ]
+            if c in data.columns
+        ]
+        context = data[context_cols].copy()
+        recs = recommendations.copy()
+        recs["customer_id"] = recs["customer_id"].astype(str)
+        context["customer_id"] = context["customer_id"].astype(str)
+        recs = recs.merge(context, on="customer_id", how="left")
+        if "churn_probability" not in recs.columns:
+            recs["churn_probability"] = recs.get("churn_prob", 0.0)
+        recs.drop(columns=["churn_prob"], inplace=True, errors="ignore")
+        for col, default in [
+            ("segment", "unknown"),
+            ("uplift_segment", "unknown"),
+            ("uplift_score", 0.0),
+            ("clv", 0.0),
+            ("churn_probability", 0.0),
+            ("priority_score", recs["score"]),
+        ]:
+            if col not in recs.columns:
+                recs[col] = default
+        recs["expected_revenue_saved"] = (
+            np.maximum(recs["uplift_score"].astype(float), 0.0)
+            * recs["clv"].astype(float)
+        )
+        recs.loc[recs["action_type"].eq("no_action"), "expected_revenue_saved"] = 0.0
+        recs["expected_roi"] = np.where(
+            recs["estimated_cost"].astype(float) > 0,
+            recs["expected_revenue_saved"] / recs["estimated_cost"].astype(float),
+            0.0,
+        )
+        recs["recommendation_type"] = recs["action_type"]
+        recs["recommended_offer"] = recs["action_type"]
+        recs["expected_uplift"] = recs["uplift_score"]
+        return recs
+
     def _build_reason(self, rec_row: pd.Series, data: pd.DataFrame) -> str:
         """Build a human-readable explanation for a recommendation."""
         cid = rec_row["customer_id"]
         atype = rec_row["action_type"]
 
-        cust = data.loc[data["customer_id"] == cid].iloc[0]
+        cust = data.loc[data["customer_id"].astype(str) == str(cid)].iloc[0]
         segment = str(cust.get("segment", "unknown"))
         churn = float(cust.get("churn_prob", 0))
         clv = float(cust.get("clv", 0))

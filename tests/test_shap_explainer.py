@@ -216,6 +216,14 @@ class TestGlobalFeatureImportance:
             assert isinstance(item[0], str)
             assert isinstance(item[1], (int, float))
 
+    def test_backward_compatible_top_features_alias(
+        self, explainer_instance, trained_ml_model
+    ):
+        """Older top_features alias should still work."""
+        _, _, X_test, _ = trained_ml_model
+        top_3 = explainer_instance.top_features(X_test, n=3)
+        assert len(top_3) == 3
+
 
 # ---------------------------------------------------------------------------
 # Individual prediction explanation tests
@@ -278,6 +286,28 @@ class TestShapPlots:
         explainer_instance.save_summary_plot(X_test, str(output_path))
         assert output_path.exists(), "Summary plot file not created"
         assert output_path.stat().st_size > 0, "Summary plot file is empty"
+
+    def test_backward_compatible_summary_plot_alias(
+        self, explainer_instance, trained_ml_model, tmp_path
+    ):
+        """Older summary_plot alias should still save the figure."""
+        _, _, X_test, _ = trained_ml_model
+        output_path = tmp_path / "shap_summary_alias.png"
+        explainer_instance.summary_plot(X_test, save_path=str(output_path))
+        assert output_path.exists(), "Summary plot alias file not created"
+
+    def test_export_top_features_saves_csv(
+        self, explainer_instance, trained_ml_model, tmp_path
+    ):
+        """Top-features export helper should persist a report."""
+        _, _, X_test, _ = trained_ml_model
+        output_path = tmp_path / "top_features.csv"
+        exported = explainer_instance.export_top_features(
+            X_test, str(output_path), k=7
+        )
+        assert output_path.exists(), "Top-features CSV not created"
+        assert len(exported) == 7
+        assert list(exported.columns) == ["feature", "importance"]
 
     def test_force_plot_saves_file(self, explainer_instance, trained_ml_model, tmp_path):
         """save_force_plot must create a file for an individual prediction."""

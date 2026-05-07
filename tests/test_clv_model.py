@@ -377,6 +377,36 @@ class TestCustomerRanking:
             f"Ranking has {len(ranked)} customers, expected {len(sample_clv_data)}"
         )
 
+    def test_holdout_helper_supports_actual_vs_predicted(
+        self, clv_model, sample_clv_data
+    ):
+        """Holdout helper should surface actual-vs-predicted validation."""
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+        n = len(sample_clv_data)
+        train_idx = int(n * 0.8)
+        train = sample_clv_data.iloc[:train_idx]
+        test = sample_clv_data.iloc[train_idx:]
+        clv_model.fit(train[feature_cols], train["clv_target"])
+        report = clv_model.evaluate_holdout(
+            test[feature_cols],
+            test["clv_target"],
+            customer_ids=test["customer_id"],
+        )
+        assert "mae" in report["metrics"]
+        assert len(report["top_n"]) > 0
+
+    def test_value_report_contains_high_value_flag(self, clv_model, sample_clv_data):
+        """Top-N/distribution helper should create a high-value cut."""
+        feature_cols = [c for c in sample_clv_data.columns
+                        if c not in ("customer_id", "clv_target", "churn_prob")]
+        clv_model.fit(sample_clv_data[feature_cols], sample_clv_data["clv_target"])
+        report = clv_model.build_value_report(
+            sample_clv_data["customer_id"], sample_clv_data[feature_cols]
+        )
+        assert "high_value" in report["ranking"].columns
+        assert report["distribution"]["high_value_count"] > 0
+
 
 # ---------------------------------------------------------------------------
 # Churn integration tests

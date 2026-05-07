@@ -197,9 +197,34 @@ class DriftReport:
         """Return JSON-serializable representation of the full report."""
         return {
             "feature_psi": {k: float(v) for k, v in self.feature_psi.items()},
+            "feature_alerts": {
+                k: v.to_dict() for k, v in self.feature_alerts.items()
+            },
             "alerts": {k: v.to_dict() for k, v in self.feature_alerts.items()},
             "summary": self.summary(),
         }
+
+    @classmethod
+    def from_dict(cls, payload: Dict) -> "DriftReport":
+        """Reconstruct a DriftReport from serialized payload."""
+        alerts_payload = payload.get("feature_alerts") or payload.get("alerts") or {}
+        feature_alerts = {
+            name: DriftAlert(
+                psi_value=alert.get("psi_value", 0.0),
+                yellow_threshold=alert.get(
+                    "yellow_threshold", DEFAULT_YELLOW_THRESHOLD
+                ),
+                red_threshold=alert.get("red_threshold", DEFAULT_RED_THRESHOLD),
+            )
+            for name, alert in alerts_payload.items()
+        }
+        return cls(
+            feature_psi={
+                name: float(value)
+                for name, value in payload.get("feature_psi", {}).items()
+            },
+            feature_alerts=feature_alerts,
+        )
 
 
 class DriftDetector:

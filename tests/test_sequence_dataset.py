@@ -227,6 +227,31 @@ class TestSequencePreparation:
         # This is implicitly tested by the ordering in the function
         assert result["sequences"].shape[0] > 0
 
+    def test_prepare_sequence_training_data_marks_real_sequences(
+        self, sample_sequential_data, sample_labels, window_size
+    ):
+        """Prepared real sequence payload should be tagged correctly."""
+        from src.models.sequence_utils import prepare_sequence_training_data
+
+        result = prepare_sequence_training_data(
+            sample_sequential_data,
+            labels=sample_labels,
+            window_size=window_size,
+            time_col="month",
+            customer_col="customer_id",
+        )
+        assert result["sequence_source"] == "event_sequence"
+        assert result["sequences"].shape[1] == window_size
+
+    def test_tabular_to_pseudo_sequences_marks_source(self):
+        """Pseudo-sequence fallback should remain explicit."""
+        from src.models.sequence_utils import tabular_to_pseudo_sequences
+
+        df = pd.DataFrame(np.random.randn(12, 4), columns=["a", "b", "c", "d"])
+        result = tabular_to_pseudo_sequences(df, window_size=5)
+        assert result["sequence_source"] == "pseudo_sequence"
+        assert result["sequences"].shape == (12, 5, 4)
+
 
 # ---------------------------------------------------------------------------
 # PyTorch Dataset Tests

@@ -38,6 +38,10 @@ from src.models.churn_model import (
     LSTMChurnNetwork,
     TransformerChurnNetwork,
 )
+from src.models.sequence_utils import (
+    prepare_sequence_training_data,
+    tabular_to_pseudo_sequences,
+)
 
 
 class EarlyStopping:
@@ -236,28 +240,66 @@ class DLTrainer:
         Returns:
             Tuple of (tensor, feature_mean, feature_std).
         """
-        values = X.values.astype(np.float32)
-
-        if feature_mean is None:
-            feature_mean = values.mean(axis=0)
-        if feature_std is None:
-            feature_std = values.std(axis=0) + 1e-8
-
-        values = (values - feature_mean) / feature_std
-
-        n_samples = values.shape[0]
-        sequences = np.tile(
-            values[:, np.newaxis, :], (1, self.sequence_window, 1)
+        prepared = tabular_to_pseudo_sequences(
+            X,
+            window_size=self.sequence_window,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
         )
-        for t in range(self.sequence_window):
-            scale = (t + 1) / self.sequence_window
-            sequences[:, t, :] *= scale
-
         return (
-            torch.tensor(sequences, dtype=torch.float32),
-            feature_mean,
-            feature_std,
+            torch.tensor(prepared["sequences"], dtype=torch.float32),
+            prepared["feature_mean"],
+            prepared["feature_std"],
         )
+
+    def prepare_sequence_inputs(
+        self,
+        X: Optional[pd.DataFrame] = None,
+        y: Optional[np.ndarray] = None,
+        sequence_data: Optional[Dict[str, np.ndarray]] = None,
+        labels: Optional[pd.DataFrame] = None,
+        time_col: str = "month",
+        customer_col: str = "customer_id",
+        label_col: str = "churn_label",
+        feature_mean: Optional[np.ndarray] = None,
+        feature_std: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """Prepare either real event sequences or legacy pseudo-sequences."""
+        if sequence_data is not None:
+            prepared = prepare_sequence_training_data(
+                sequence_data,
+                window_size=self.sequence_window,
+                feature_mean=feature_mean,
+                feature_std=feature_std,
+            )
+            if y is not None and "labels" not in prepared:
+                prepared["labels"] = np.asarray(y, dtype=np.float32)
+            return prepared
+
+        if labels is not None and X is not None:
+            return prepare_sequence_training_data(
+                X,
+                labels=labels,
+                window_size=self.sequence_window,
+                time_col=time_col,
+                customer_col=customer_col,
+                label_col=label_col,
+                feature_mean=feature_mean,
+                feature_std=feature_std,
+            )
+
+        if X is None:
+            raise ValueError("X or sequence_data must be provided.")
+
+        prepared = tabular_to_pseudo_sequences(
+            X,
+            window_size=self.sequence_window,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+        )
+        if y is not None:
+            prepared["labels"] = np.asarray(y, dtype=np.float32)
+        return prepared
 
     def train_single_architecture(
         self,
@@ -267,6 +309,8 @@ class DLTrainer:
         y_val: Optional[np.ndarray] = None,
         architecture: Optional[str] = None,
         tracker: Optional[Any] = None,
+        sequence_train_data: Optional[Dict[str, np.ndarray]] = None,
+        sequence_val_data: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """Train a single DL architecture with early stopping.
 
@@ -287,10 +331,8 @@ class DLTrainer:
         if architecture is None:
             architecture = self.architecture
 
-        input_size = X_train.shape[1]
-
         # Create validation split if not provided
-        if X_val is None or y_val is None:
+        if sequence_train_data is None and (X_val is None or y_val is None):
             val_ratio = 0.2
             n_val = max(1, int(len(X_train) * val_ratio))
             X_val_df = X_train.iloc[-n_val:]
@@ -304,8 +346,38 @@ class DLTrainer:
             y_val_arr = y_val
 
         # Prepare tensors
-        X_train_t, feat_mean, feat_std = self._prepare_tensor(X_train_df)
-        X_val_t, _, _ = self._prepare_tensor(X_val_df, feat_mean, feat_std)
+        if sequence_train_data is not None:
+            prepared_train = self.prepare_sequence_inputs(
+                sequence_data=sequence_train_data,
+            )
+            feat_mean = prepared_train["feature_mean"]
+            feat_std = prepared_train["feature_std"]
+            X_train_t = torch.tensor(prepared_train["sequences"], dtype=torch.float32)
+            y_train_arr = np.asarray(
+                prepared_train.get("labels", y_train_arr), dtype=np.float32
+            )
+
+            if sequence_val_data is not None:
+                prepared_val = self.prepare_sequence_inputs(
+                    sequence_data=sequence_val_data,
+                    feature_mean=feat_mean,
+                    feature_std=feat_std,
+                )
+                X_val_t = torch.tensor(prepared_val["sequences"], dtype=torch.float32)
+                y_val_arr = np.asarray(
+                    prepared_val.get("labels", y_val_arr), dtype=np.float32
+                )
+            else:
+                val_count = max(1, int(len(X_train_t) * 0.2))
+                X_val_t = X_train_t[-val_count:].clone()
+                y_val_arr = y_train_arr[-val_count:]
+                X_train_t = X_train_t[:-val_count].clone()
+                y_train_arr = y_train_arr[:-val_count]
+            input_size = X_train_t.shape[-1]
+        else:
+            input_size = X_train.shape[1]
+            X_train_t, feat_mean, feat_std = self._prepare_tensor(X_train_df)
+            X_val_t, _, _ = self._prepare_tensor(X_val_df, feat_mean, feat_std)
         y_train_t = torch.tensor(y_train_arr.astype(np.float32))
         y_val_t = torch.tensor(y_val_arr.astype(np.float32))
 
@@ -419,6 +491,8 @@ class DLTrainer:
         y_val: Optional[np.ndarray] = None,
         architectures: Optional[List[str]] = None,
         tracker: Optional[Any] = None,
+        sequence_train_data: Optional[Dict[str, np.ndarray]] = None,
+        sequence_val_data: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """Train both LSTM and Transformer and select the best.
 
@@ -451,6 +525,8 @@ class DLTrainer:
                 y_val=y_val,
                 architecture=arch,
                 tracker=tracker,
+                sequence_train_data=sequence_train_data,
+                sequence_val_data=sequence_val_data,
             )
             results[arch] = result
 
@@ -486,6 +562,8 @@ class DLTrainer:
         y_test: np.ndarray,
         tracker: Optional[Any] = None,
         select_architecture: bool = False,
+        sequence_train_data: Optional[Dict[str, np.ndarray]] = None,
+        sequence_test_data: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """Full training and evaluation pipeline.
 
@@ -509,6 +587,7 @@ class DLTrainer:
                 X_train=X_train,
                 y_train=y_train,
                 tracker=tracker,
+                sequence_train_data=sequence_train_data,
             )
         else:
             result = self.train_single_architecture(
@@ -516,6 +595,7 @@ class DLTrainer:
                 y_train=y_train,
                 architecture=self.architecture,
                 tracker=tracker,
+                sequence_train_data=sequence_train_data,
             )
 
         # Build a DLChurnModel wrapper with the trained network
@@ -531,7 +611,19 @@ class DLTrainer:
         dl_model._feature_std = result["feature_std"]
 
         # Evaluate on test set
-        test_probs = dl_model.predict_proba(X_test)
+        if sequence_test_data is not None:
+            prepared_test = self.prepare_sequence_inputs(
+                sequence_data=sequence_test_data,
+                feature_mean=result["feature_mean"],
+                feature_std=result["feature_std"],
+            )
+            with torch.no_grad():
+                logits = result["model"](
+                    torch.tensor(prepared_test["sequences"], dtype=torch.float32)
+                )
+            test_probs = torch.sigmoid(logits).cpu().numpy()
+        else:
+            test_probs = dl_model.predict_proba(X_test)
         eval_metrics = self._compute_metrics(y_test, test_probs)
         self.evaluation_results = eval_metrics
 
@@ -556,9 +648,15 @@ class DLTrainer:
             "dl_model": dl_model,
             "network": result["model"],
             "evaluation": eval_metrics,
+            "test_probabilities": np.asarray(test_probs, dtype=np.float64),
             "history": result["history"],
             "architecture": result["architecture"],
             "best_epoch": result["best_epoch"],
+            "sequence_source": (
+                "event_sequence"
+                if sequence_train_data is not None
+                else "pseudo_sequence"
+            ),
         }
 
     def _compute_metrics(

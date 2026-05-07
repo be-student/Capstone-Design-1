@@ -116,7 +116,7 @@ cd capstone
 # 2. (Optional) Create .env to override defaults
 cat > .env <<'EOF'
 PIPELINE_MODE=all
-SMALL=true
+SMALL=false
 VERBOSE=false
 EOF
 
@@ -160,7 +160,7 @@ The `docker-compose.yml` defines four services with the following key configurat
 **MLflow Tracking Server:**
 - SQLite backend store (no PostgreSQL required)
 - Filesystem artifact store at `/mlflow/artifacts`
-- Health check: `curl -f http://localhost:5000/health`
+- Health check: `curl -f http://localhost:5001/health` from the host, or `curl -f http://mlflow:5000/health` inside Docker
 - Restart policy: `unless-stopped`
 
 **Redis:**
@@ -204,7 +204,7 @@ docker build -f Dockerfile.mlflow -t churn-mlflow .
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PIPELINE_MODE` | `all` | Execution mode (see [CLI modes](#33-available-modes)) |
-| `SMALL` | `true` | `"true"` for reduced dataset (5K customers, 6 months) |
+| `SMALL` | `false` | `"true"` for reduced dataset (5K customers, 6 months) |
 | `BUDGET` | _(empty)_ | Budget cap for `optimize` mode (KRW) |
 | `VERBOSE` | `false` | `"true"` for DEBUG-level logging |
 | `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow server URL |
@@ -292,7 +292,7 @@ Services reference each other by service name (e.g., `redis:6379`, `mlflow:5000`
 | Service | Check | Interval | Timeout | Retries | Start Period |
 |---------|-------|----------|---------|---------|-------------|
 | `redis` | `redis-cli ping` | 10s | 5s | 3 | — |
-| `mlflow` | `curl -f http://localhost:5000/health` | 15s | 10s | 5 | 10s |
+| `mlflow` | `curl -f http://localhost:5001/health` (host) / `curl -f http://mlflow:5000/health` (Docker network) | 15s | 10s | 5 | 10s |
 | `dashboard` | `curl -f http://localhost:8501/_stcore/health` | 30s | 10s | 3 | 20s |
 
 **Failure Scenarios:**
@@ -331,13 +331,13 @@ python -m src.main --mode <MODE> [OPTIONS]
 | `simulate` | Generate synthetic customer data | None |
 | `train` | Train ML, DL, and Ensemble churn models | `simulate` (data in `data/raw/`) |
 | `uplift` | Train uplift model (T-Learner/S-Learner) and 4-quadrant segmentation | `simulate` |
-| `clv` | Predict Customer Lifetime Value (BG/NBD) | `simulate` |
+| `clv` | Predict Customer Lifetime Value with ML regression and holdout validation | `simulate` |
 | `optimize` | LP-based budget optimization across segments | `uplift` + `clv` (or uses synthetic data) |
 | `ab_test` | A/B test power analysis and significance testing | `simulate` (uses treatment groups) |
 | `survival` | Cox Proportional Hazards survival analysis | `simulate` + features |
 | `recommend` | Generate personalized retention recommendations | `simulate` (+ optional `uplift`, `clv`) |
 | `cohort` | Cohort retention analysis with heatmaps | `simulate` (events data) |
-| `segment` | Customer segmentation (RFM-based) | `simulate` + features |
+| `segment` | Customer segmentation using churn probability, uplift, and CLV | `simulate` + `train` + `uplift` + `clv` |
 | `features` | Run feature engineering pipeline only | `simulate` |
 | `monitor` | Model monitoring (PSI & KS drift detection) | `simulate` + features |
 | `dashboard` | Launch Streamlit dashboard (localhost:8501) | Results from other modes |
@@ -505,13 +505,15 @@ The `all` mode runs the complete end-to-end pipeline in this order:
 5. dl_model_training     → train deep learning model (PyTorch)
 6. ensemble_creation     → build ensemble from ML + DL
 7. uplift_modeling       → T-Learner uplift model
-8. clv_prediction        → BG/NBD lifetime value
-9. budget_optimization   → LP-based budget allocation
-10. ab_testing           → A/B test statistical analysis
-11. survival_analysis    → Cox PH survival curves
-12. recommendations      → personalized retention actions
-13. scoring_api_setup    → model monitoring
-14. mlflow_logging       → experiment tracking
+8. clv_prediction        → ML-based lifetime value
+9. customer_segmentation → churn/uplift/CLV 6+ segments
+10. budget_optimization  → LP-based budget allocation
+11. recommendations      → personalized retention actions
+12. cohort_analysis      → cohort retention and journey analysis
+13. ab_testing           → A/B test statistical analysis
+14. survival_analysis    → Cox PH survival curves
+15. scoring_api_setup    → model monitoring
+16. mlflow_logging       → experiment tracking
 ```
 
 **Checkpoint/Resume:** The pipeline stores state in `data/raw/pipeline_state.json`.

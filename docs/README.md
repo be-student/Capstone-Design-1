@@ -14,7 +14,7 @@ This system delivers a complete retention optimization pipeline that goes far be
 - **Engineer** 30+ features including RFM metrics, behavioral change indicators, session quality scores, and sequence embeddings
 - **Predict** churn using an ensemble of ML (XGBoost / LightGBM) and DL (Transformer / LSTM) models with 5-fold cross-validation
 - **Model uplift** to identify which customers actually respond to marketing interventions (T-Learner & S-Learner)
-- **Estimate CLV** per customer using BG/NBD-inspired gradient boosting for 12-month forward value prediction
+- **Estimate CLV** per customer using ML-based 12-month forward value regression
 - **Optimize budgets** via linear programming under real-world constraints across 5 marketing channels
 - **Design & analyze A/B tests** with power analysis, Chi-square/Z-tests, and 95% confidence intervals
 - **Analyze survival** patterns with Kaplan-Meier and Cox Proportional Hazards models
@@ -28,7 +28,7 @@ This system delivers a complete retention optimization pipeline that goes far be
 |------------|-------------|
 | **13 Mandatory Features** | Simulation, cohort analysis, feature engineering, ML/DL churn prediction, uplift modeling, CLV, segmentation, budget optimization, A/B testing, dashboard, monitoring, documentation |
 | **4 Bonus Features** | Real-time scoring (Redis), survival analysis, personalized recommendations, MLflow experiment tracking |
-| **14-Stage Pipeline** | Fully orchestrated with checkpoint/resume support |
+| **16-Stage Pipeline** | Fully orchestrated with checkpoint/resume support |
 | **4 Docker Services** | Pipeline, Dashboard, MLflow, Redis -- all containerized |
 
 ---
@@ -42,7 +42,7 @@ The platform follows a layered architecture with clear separation of concerns. E
 ```
 +------------------------------------------------------------------+
 |                    PRESENTATION LAYER                              |
-|     Streamlit Dashboard (:8501)  |  MLflow UI (:5000)             |
+|     Streamlit Dashboard (:8501)  |  MLflow UI (:5001 host / :5000 container) |
 |     10+ interactive views        |  Experiment tracking            |
 +----------------------------------+-------------------------------+
                     |                              |
@@ -68,7 +68,7 @@ The platform follows a layered architecture with clear separation of concerns. E
 +------------------------------------------------------------------+
 |                    MODEL LAYER                                     |
 |  Churn Prediction  | Uplift Modeling | CLV Prediction | Survival  |
-|  XGBoost/LightGBM  | T/S-Learner    | GBM (BG/NBD)  | KM / Cox  |
+|  XGBoost/LightGBM  | T/S-Learner    | ML regressor  | KM / Cox  |
 |  Transformer/LSTM  | 4-quadrant seg | 12-month fwd   | Hazard    |
 |  Ensemble (0.6/0.4)| CATE scores    | Top-20% ID     | Curves    |
 +------------------------------------------------------------------+
@@ -88,13 +88,13 @@ The platform follows a layered architecture with clear separation of concerns. E
 +------------------------------------------------------------------+
 |                    INFRASTRUCTURE                                  |
 |  Docker Compose | Config (YAML) | MLflow Tracking | Redis Cache  |
-|  Pipeline Orchestration (14 stages with checkpoints)              |
+|  Pipeline Orchestration (16 stages with checkpoints)              |
 +------------------------------------------------------------------+
 ```
 
 ### Pipeline Flow
 
-The CLI entrypoint (`src/main.py`) drives a 14-stage pipeline with dependency management:
+The CLI entrypoint (`src/main.py`) drives a 16-stage pipeline with dependency management:
 
 ```
 Data Generation --> Preprocessing --> Feature Engineering
@@ -145,10 +145,10 @@ Data Generation --> Preprocessing --> Feature Engineering
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| `pipeline` | -- | Runs the full ML/DL training pipeline (all 14 stages) |
+| `pipeline` | -- | Runs the full ML/DL training pipeline (all 16 stages) |
 | `dashboard` | 8501 | Interactive Streamlit dashboard with 10+ views |
 | `redis` | 6379 | Real-time scoring streams and feature caching |
-| `mlflow` | 5000 | Experiment tracking, model registry, artifact storage |
+| `mlflow` | 5001 host / 5000 container | Experiment tracking and artifact storage |
 
 ---
 
@@ -157,7 +157,7 @@ Data Generation --> Preprocessing --> Feature Engineering
 ```
 capstone/
 +-- src/                          # Source code
-|   +-- main.py                   # CLI entrypoint (14 modes)
+|   +-- main.py                   # CLI entrypoint (all supported modes)
 |   +-- __main__.py               # python -m src support
 |   +-- data/                     # Data generation, preprocessing
 |   +-- features/                 # Feature engineering, segmentation
@@ -166,7 +166,7 @@ capstone/
 |   +-- analysis/                 # A/B testing, cohort analysis
 |   +-- monitoring/               # Drift detection (PSI, KS-test)
 |   +-- streaming/                # Redis producer/consumer
-|   +-- pipeline/                 # 14-stage pipeline orchestration
+|   +-- pipeline/                 # 16-stage pipeline orchestration
 |   +-- dashboard/                # Streamlit app (10+ views)
 |
 +-- config/                       # YAML configuration files
@@ -243,7 +243,7 @@ pip install -r requirements.txt
 #### Run the Full Pipeline
 
 ```bash
-# Full pipeline (all 14 stages)
+# Full pipeline (all 16 stages)
 python -m src.main --mode all
 
 # Small mode for development (5K customers, 6 months)
@@ -337,7 +337,7 @@ After running the full pipeline, the following artifacts are generated:
 | Segment Classification | `results/segments_6plus.csv` | 6+ segments with priority scores |
 | Monitoring Report | `results/monitoring_report.json` | PSI/KS drift metrics & alerts |
 | SHAP Summary | `results/shap_summary.png` | Top 10 feature importance plot |
-| Budget Allocation | `results/budget_allocation.json` | Optimal channel-level budget split |
+| Budget Allocation | `results/budget_results.csv` | Segment budget split with expected ROI |
 | Cohort Curves | `results/cohort_retention_curves.png` | M1/M3/M6/M12 retention curves |
 | Trained Models | `models/` | Serialized ML, DL, uplift, CLV, survival models |
 
@@ -362,7 +362,7 @@ After running the full pipeline, the following artifacts are generated:
 | **Language** | Python 3.10+ |
 | **ML Models** | XGBoost, LightGBM, scikit-learn, SHAP |
 | **Deep Learning** | PyTorch 2.0+ (LSTM, Transformer) |
-| **CLV / Survival** | lifelines (BG/NBD, Kaplan-Meier, Cox PH) |
+| **CLV / Survival** | ML-based CLV regression, lifelines Cox PH survival |
 | **Optimization** | scipy.optimize (linear programming) |
 | **Statistics** | scipy.stats (Chi-square, Z-test, KS-test) |
 | **Dashboard** | Streamlit, Plotly |

@@ -12,7 +12,9 @@ All configurable parameters are sourced from config/simulator_config.yaml.
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -147,8 +149,39 @@ def check_mlflow_health(config: Dict) -> Dict[str, Any]:
         "error": None,
     }
 
+    parsed_uri = urlparse(tracking_uri)
+
+    if parsed_uri.scheme == "sqlite":
+        db_path = Path(parsed_uri.path)
+        result["connected"] = db_path.exists()
+        result["status"] = STATUS_DEGRADED
+        if db_path.exists():
+            result["status"] = STATUS_HEALTHY
+        else:
+            result["error"] = f"MLflow tracking DB not found: {db_path}"
+        return result
+
+    if parsed_uri.scheme in {"http", "https"}:
+        health_url = tracking_uri.rstrip("/") + "/health"
+        try:
+            import requests
+
+            response = requests.get(health_url, timeout=1)
+            result["connected"] = response.ok
+            result["status"] = STATUS_HEALTHY if response.ok else STATUS_DEGRADED
+            if not response.ok:
+                result["error"] = f"MLflow health endpoint returned {response.status_code}"
+        except ImportError:
+            result["status"] = STATUS_DEGRADED
+            result["error"] = "requests package not installed"
+        except Exception as e:
+            result["status"] = STATUS_DEGRADED
+            result["error"] = f"MLflow server not reachable: {e}"
+        return result
+
     try:
         import mlflow
+
         mlflow.set_tracking_uri(tracking_uri)
         experiments = mlflow.search_experiments()
 
@@ -217,14 +250,20 @@ def check_pipeline_health(config: Dict) -> Dict[str, Any]:
     """
     from pathlib import Path
 
-    artifacts_dir = Path(
+    configured_artifacts_dir = Path(
         config.get("dashboard", {}).get("artifacts_dir", "data/artifacts")
+    )
+    artifact_candidates = [configured_artifacts_dir, Path("results")]
+    artifacts_dir = next(
+        (candidate for candidate in artifact_candidates if candidate.exists()),
+        configured_artifacts_dir,
     )
     models_dir = Path("models")
 
     result = {
         "status": STATUS_DOWN,
         "artifacts_dir": str(artifacts_dir),
+        "artifact_sources": [str(path) for path in artifact_candidates],
         "artifacts_exist": artifacts_dir.exists(),
         "artifact_count": 0,
         "models_available": [],

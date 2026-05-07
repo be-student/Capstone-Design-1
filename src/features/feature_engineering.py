@@ -19,6 +19,7 @@ Usage:
 """
 
 import os
+import warnings
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -222,9 +223,11 @@ class FeatureEngineer:
 
         # Split each customer's events into first half and second half
         result_rows = []
+        events_by_customer = self._events_by_customer(events)
+        empty_events = events.iloc[0:0]
 
         for cid in customers["customer_id"].unique():
-            cust_events = events[events["customer_id"] == cid].copy()
+            cust_events = events_by_customer.get(cid, empty_events)
 
             if len(cust_events) == 0:
                 result_rows.append(self._empty_change_row(cid))
@@ -369,12 +372,14 @@ class FeatureEngineer:
         events = self._ensure_datetime(events)
 
         purchases = events[events["event_type"] == "purchase"].copy()
+        purchases_by_customer = self._events_by_customer(purchases)
+        empty_purchases = purchases.iloc[0:0]
         result_rows = []
 
         for cid in customers["customer_id"].unique():
-            cust_purchases = purchases[
-                purchases["customer_id"] == cid
-            ].sort_values("event_date")
+            cust_purchases = purchases_by_customer.get(cid, empty_purchases).sort_values(
+                "event_date"
+            )
 
             if len(cust_purchases) < 2:
                 # Not enough purchases to compute cycle
@@ -436,9 +441,11 @@ class FeatureEngineer:
         """
         events = self._ensure_datetime(events)
         result_rows = []
+        events_by_customer = self._events_by_customer(events)
+        empty_events = events.iloc[0:0]
 
         for cid in customers["customer_id"].unique():
-            cust_events = events[events["customer_id"] == cid]
+            cust_events = events_by_customer.get(cid, empty_events)
             row = {"customer_id": cid}
 
             if len(cust_events) == 0:
@@ -538,9 +545,11 @@ class FeatureEngineer:
         result_rows = []
         distribution_vectors = []
         customer_ids = []
+        events_by_customer = self._events_by_customer(events)
+        empty_events = events.iloc[0:0]
 
         for cid in customers["customer_id"].unique():
-            cust_events = events[events["customer_id"] == cid]
+            cust_events = events_by_customer.get(cid, empty_events)
             row = {"customer_id": cid}
 
             # Sequence diversity
@@ -626,9 +635,11 @@ class FeatureEngineer:
         """
         events = self._ensure_datetime(events)
         result_rows = []
+        events_by_customer = self._events_by_customer(events)
+        empty_events = events.iloc[0:0]
 
         for cid in customers["customer_id"].unique():
-            cust_events = events[events["customer_id"] == cid]
+            cust_events = events_by_customer.get(cid, empty_events)
             row = {"customer_id": cid}
 
             if len(cust_events) == 0:
@@ -713,9 +724,11 @@ class FeatureEngineer:
         """
         events = self._ensure_datetime(events)
         result_rows = []
+        events_by_customer = self._events_by_customer(events)
+        empty_events = events.iloc[0:0]
 
         for cid in customers["customer_id"].unique():
-            cust_events = events[events["customer_id"] == cid]
+            cust_events = events_by_customer.get(cid, empty_events)
             row = {"customer_id": cid}
 
             if len(cust_events) == 0:
@@ -795,9 +808,17 @@ class FeatureEngineer:
             store_path: Directory path for the feature store.
         """
         os.makedirs(store_path, exist_ok=True)
-        features.to_parquet(
-            os.path.join(store_path, "features.parquet"), index=False
-        )
+        parquet_path = os.path.join(store_path, "features.parquet")
+        try:
+            features.to_parquet(parquet_path, index=False)
+        except Exception as exc:
+            warnings.warn(
+                f"Parquet feature store save failed; CSV fallback only: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            if os.path.exists(parquet_path):
+                os.remove(parquet_path)
         features.to_csv(
             os.path.join(store_path, "features.csv"), index=False
         )
@@ -820,13 +841,21 @@ class FeatureEngineer:
         csv_path = os.path.join(store_path, "features.csv")
 
         if os.path.exists(parquet_path):
-            return pd.read_parquet(parquet_path)
-        elif os.path.exists(csv_path):
+            try:
+                return pd.read_parquet(parquet_path)
+            except Exception as exc:
+                if not os.path.exists(csv_path):
+                    raise
+                warnings.warn(
+                    f"Parquet feature store load failed; using CSV fallback: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        if os.path.exists(csv_path):
             return pd.read_csv(csv_path)
-        else:
-            raise FileNotFoundError(
-                f"No feature files found in {store_path}"
-            )
+        raise FileNotFoundError(
+            f"No feature files found in {store_path}"
+        )
 
     # ------------------------------------------------------------------
     # Helper Methods
@@ -853,6 +882,16 @@ class FeatureEngineer:
                     events["timestamp"], errors="coerce"
                 )
         return events
+
+    @staticmethod
+    def _events_by_customer(events: pd.DataFrame) -> Dict[Any, pd.DataFrame]:
+        """Group events once so per-customer feature passes stay linear."""
+        if events.empty or "customer_id" not in events.columns:
+            return {}
+        return {
+            customer_id: group
+            for customer_id, group in events.groupby("customer_id", sort=False)
+        }
 
     @staticmethod
     def _safe_ratio(

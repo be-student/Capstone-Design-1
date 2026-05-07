@@ -31,6 +31,22 @@ from src.monitoring.ks_drift import KSDriftDetector, KSDriftReport
 logger = logging.getLogger(__name__)
 
 
+def serialize_monitoring_report(report: Any) -> Dict[str, Any]:
+    """Normalize drift report objects or payloads for JSON/report consumers."""
+    if report is None:
+        return {}
+    if hasattr(report, "to_dict"):
+        return report.to_dict()
+    if isinstance(report, dict):
+        normalized = dict(report)
+        alerts = normalized.get("feature_alerts") or normalized.get("alerts") or {}
+        normalized["feature_alerts"] = alerts
+        normalized["alerts"] = alerts
+        normalized.setdefault("summary", {})
+        return normalized
+    raise TypeError(f"Unsupported report type: {type(report).__name__}")
+
+
 class AlertLevel(Enum):
     """Alert severity levels for drift detection.
 
@@ -71,8 +87,8 @@ class MonitoringResult:
     def to_dict(self) -> Dict[str, Any]:
         """Return JSON-serializable dict representation."""
         return {
-            "psi_report": self.psi_report,
-            "ks_report": self.ks_report,
+            "psi_report": serialize_monitoring_report(self.psi_report),
+            "ks_report": serialize_monitoring_report(self.ks_report),
             "overall_alert_level": self.overall_alert_level.value,
             "drifted_features": self.drifted_features,
             "timestamp": self.timestamp,
@@ -197,14 +213,14 @@ class ModelMonitoringService:
             psi_report_obj = self.psi_detector.detect(
                 production, features=psi_features
             )
-            psi_report_dict = psi_report_obj.to_dict()
+            psi_report_dict = serialize_monitoring_report(psi_report_obj)
 
         # Run KS detection
         ks_report_obj: Optional[KSDriftReport] = None
         ks_report_dict: Dict[str, Any] = {}
         if self.ks_detector and self.ks_detector.reference_data is not None:
             ks_report_obj = self.ks_detector.detect(production)
-            ks_report_dict = ks_report_obj.to_dict()
+            ks_report_dict = serialize_monitoring_report(ks_report_obj)
 
         # Determine drifted features and overall alert level
         drifted_features = []

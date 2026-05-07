@@ -16,7 +16,7 @@ Usage:
 import pickle
 import logging
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -195,7 +195,10 @@ class UpliftModel:
         return (p_control - p_treatment).astype(np.float64)
 
     def segment_customers(
-        self, uplift_scores: Union[np.ndarray, list]
+        self,
+        uplift_scores: Union[np.ndarray, list],
+        baseline_churn_probability: Optional[Union[np.ndarray, list]] = None,
+        neutral_band: Optional[float] = None,
     ) -> np.ndarray:
         """Segment customers into 4-quadrant uplift categories.
 
@@ -216,6 +219,37 @@ class UpliftModel:
             Segment labels for each customer.
         """
         scores = np.asarray(uplift_scores, dtype=np.float64)
+
+        if neutral_band is None:
+            neutral_band = float(
+                self.segment_thresholds.get("neutral_uplift_threshold", 0.05)
+            )
+
+        if baseline_churn_probability is not None:
+            churn = np.asarray(baseline_churn_probability, dtype=np.float64)
+            if churn.shape[0] != scores.shape[0]:
+                raise ValueError("baseline_churn_probability length must match scores.")
+
+            high_churn_cut = float(
+                self.segment_thresholds.get("high_churn_threshold", 0.5)
+            )
+            segments = np.full(len(scores), "unknown", dtype=object)
+
+            sleeping = scores < 0
+            high_uplift = scores > neutral_band
+            neutral_uplift = np.abs(scores) <= neutral_band
+            high_churn = churn >= high_churn_cut
+
+            segments[high_uplift & high_churn] = "persuadable"
+            segments[(high_uplift & ~high_churn) | (neutral_uplift & ~high_churn)] = "sure_thing"
+            segments[neutral_uplift & high_churn] = "lost_cause"
+            segments[sleeping] = "sleeping_dog"
+
+            unassigned = segments == "unknown"
+            segments[unassigned & high_churn] = "persuadable"
+            segments[unassigned & ~high_churn] = "sure_thing"
+            return segments
+
         median_uplift = np.median(scores)
 
         segments = np.empty(len(scores), dtype=object)
@@ -240,6 +274,32 @@ class UpliftModel:
             segments[unassigned & (scores < 0)] = "lost_cause"
 
         return segments
+
+    def compare_learners(
+        self,
+        X: Union[pd.DataFrame, np.ndarray],
+        treatment: Union[pd.Series, np.ndarray],
+        y: Union[pd.Series, np.ndarray],
+        learners: Sequence[str] = ("t_learner", "s_learner"),
+    ) -> pd.DataFrame:
+        """Fit multiple meta-learners and compare them on shared data."""
+        rows = []
+        for learner in learners:
+            model = UpliftModel(self.config, learner=learner)
+            model.fit(X, treatment, y)
+            uplift = model.predict_uplift(X)
+            rows.append(
+                {
+                    "learner": learner,
+                    "auuc": model.compute_auuc(y, uplift, treatment),
+                    "mean_uplift": float(np.mean(uplift)),
+                    "std_uplift": float(np.std(uplift)),
+                }
+            )
+
+        return pd.DataFrame(rows).sort_values(
+            ["auuc", "mean_uplift"], ascending=[False, False]
+        ).reset_index(drop=True)
 
     def compute_auuc(
         self,

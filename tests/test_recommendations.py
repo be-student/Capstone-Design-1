@@ -478,6 +478,17 @@ class TestRecommendationIntegration:
             "Positive-uplift customers should score higher than negative"
         )
 
+    def test_negative_uplift_gets_no_action(self, recommendation_engine,
+                                             sample_customer_data):
+        """Negative uplift customers should not receive active retention spend."""
+        data_neg = sample_customer_data.copy()
+        data_neg["uplift_score"] = -0.2
+
+        recs = recommendation_engine.recommend(data=data_neg)
+
+        assert set(recs["action_type"]) == {"no_action"}
+        assert (recs["estimated_cost"] == 0).all()
+
 
 # ---------------------------------------------------------------------------
 # Output format tests

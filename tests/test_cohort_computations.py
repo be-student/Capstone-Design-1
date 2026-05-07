@@ -201,10 +201,16 @@ class TestFullAnalysis:
         result = analyzer.full_analysis(multi_month_events, cohort_type="monthly")
         expected_keys = {
             "cohort_data", "retention_matrix", "retention_curves",
-            "avg_retention_curve", "churn_rates", "half_life",
+            "avg_retention_curve", "churn_rates", "milestone_retention", "half_life",
             "summary", "metrics",
         }
         assert expected_keys.issubset(set(result.keys()))
+
+    def test_milestone_retention_is_dataframe(self, analyzer, multi_month_events):
+        """full_analysis should expose milestone retention table."""
+        result = analyzer.full_analysis(multi_month_events, cohort_type="monthly")
+        assert isinstance(result["milestone_retention"], pd.DataFrame)
+        assert "M1" in result["milestone_retention"].columns
 
     def test_cohort_data_has_assignments(self, analyzer, multi_month_events):
         """cohort_data should have cohort and cohort_period columns."""

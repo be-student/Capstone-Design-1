@@ -476,6 +476,10 @@ class CustomerSegmenter:
             ("frequency", "avg_frequency"),
             ("monetary", "avg_monetary"),
             ("churn_probability", "avg_churn_probability"),
+            ("uplift_score", "avg_uplift_score"),
+            ("predicted_clv", "avg_predicted_clv"),
+            ("clv", "avg_clv"),
+            ("priority_score", "avg_priority_score"),
         ]:
             if col in segmented_data.columns:
                 agg_dict[col] = "mean"
@@ -487,6 +491,10 @@ class CustomerSegmenter:
             "frequency": "avg_frequency",
             "monetary": "avg_monetary",
             "churn_probability": "avg_churn_probability",
+            "uplift_score": "avg_uplift_score",
+            "predicted_clv": "avg_predicted_clv",
+            "clv": "avg_clv",
+            "priority_score": "avg_priority_score",
         })
 
         summary["percentage"] = (summary["count"] / total) * 100.0
@@ -514,6 +522,63 @@ class CustomerSegmenter:
         )
 
         return summary
+
+    def segment_value_uplift_customers(
+        self,
+        data: pd.DataFrame,
+        churn_col: str = "churn_probability",
+        uplift_col: str = "uplift_score",
+        clv_col: str = "predicted_clv",
+        customer_col: str = "customer_id",
+        new_customer_col: str = "tenure_days",
+    ) -> pd.DataFrame:
+        """Create 6+ operational segments from churn, uplift, and CLV."""
+        required = {customer_col, churn_col, uplift_col, clv_col}
+        missing = sorted(required - set(data.columns))
+        if missing:
+            raise ValueError(f"Missing required columns for value segmentation: {missing}")
+
+        result = data.copy()
+        churn = result[churn_col].astype(float)
+        uplift = result[uplift_col].astype(float)
+        clv = result[clv_col].astype(float)
+
+        high_churn_threshold = float(self.config.get("high_churn_threshold", 0.5))
+        high_value_threshold = float(clv.quantile(self.config.get("high_value_quantile", 0.8)))
+        neutral_band = float(self.config.get("neutral_uplift_threshold", 0.05))
+        onboarding_days = float(self.config.get("new_customer_days", 30))
+
+        result["value_tier"] = np.where(clv >= high_value_threshold, "high_value", "low_value")
+        result["uplift_class"] = np.where(
+            uplift < 0,
+            "sleeping_dog",
+            np.where(np.abs(uplift) <= neutral_band, "neutral", "persuadable"),
+        )
+        result["priority_score"] = uplift * clv
+
+        segments = []
+        for _, row in result.iterrows():
+            if new_customer_col in result.columns and float(row[new_customer_col]) <= onboarding_days:
+                segments.append("new_customer_onboarding")
+                continue
+
+            if row["uplift_class"] == "sleeping_dog":
+                segments.append("sleeping_dog")
+            elif row["uplift_class"] == "persuadable":
+                prefix = "high_value" if row["value_tier"] == "high_value" else "low_value"
+                segments.append(f"{prefix}_persuadable")
+            elif float(row[churn_col]) >= high_churn_threshold:
+                prefix = "high_value" if row["value_tier"] == "high_value" else "low_value"
+                segments.append(f"{prefix}_lost_cause")
+            else:
+                prefix = "high_value" if row["value_tier"] == "high_value" else "low_value"
+                segments.append(f"{prefix}_sure_thing")
+
+        result["segment"] = segments
+        cols = [customer_col, "segment", churn_col, uplift_col, clv_col, "priority_score"]
+        optional = [c for c in ["value_tier", "uplift_class", new_customer_col] if c in result.columns]
+        passthrough = [c for c in result.columns if c not in cols + optional and c in ("recency", "frequency", "monetary")]
+        return result[cols + optional + passthrough].copy()
 
     # ------------------------------------------------------------------
     # Retention Actions

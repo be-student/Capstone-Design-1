@@ -249,6 +249,28 @@ class TestComputeROI:
         for i in range(1, len(rois)):
             assert rois[i] >= rois[i - 1] * 0.95
 
+    def test_enrich_allocation_metrics_adds_dashboard_fields(
+        self, optimizer, small_data,
+    ):
+        alloc = optimizer.optimize(small_data, total_budget=20_000)
+        metrics = optimizer.enrich_allocation_metrics(alloc, small_data)
+        assert set(metrics) >= {
+            "total_allocated", "retained_value",
+            "expected_revenue_saved", "roi", "customers_treated",
+        }
+        assert metrics["expected_revenue_saved"] == pytest.approx(
+            metrics["retained_value"]
+        )
+
+
+class TestBudgetSweepDefaults:
+    def test_default_budget_sweep_uses_50_100_200_pct(
+        self, optimizer, small_data,
+    ):
+        result = optimizer.run_budget_sweep(small_data)
+        expected = [optimizer.total_budget * m for m in (0.5, 1.0, 2.0)]
+        assert result["parameter_value"].tolist() == expected
+
 
 # ---------------------------------------------------------------------------
 # optimize_multi_channel()

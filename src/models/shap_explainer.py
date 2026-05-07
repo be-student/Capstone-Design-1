@@ -13,6 +13,7 @@ All plot methods save to file (non-interactive) for pipeline integration.
 
 import logging
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib
@@ -42,7 +43,7 @@ class ShapExplainer:
     def __init__(
         self,
         model: Any,
-        background_data: pd.DataFrame,
+        background_data: Optional[pd.DataFrame] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize SHAP explainer with a trained model and background data.
@@ -55,12 +56,17 @@ class ShapExplainer:
         self.ml_model = model
         self.config = config or {}
         self.background_data = background_data
-        self.feature_names = list(background_data.columns)
+        self.feature_names = list(background_data.columns) if background_data is not None else []
 
         # Build the SHAP TreeExplainer from the underlying model
         self._explainer = self._create_explainer(model)
         self._shap_values_cache: Optional[np.ndarray] = None
         self._cache_key: Optional[int] = None
+
+    def _ensure_feature_names(self, X: pd.DataFrame) -> None:
+        """Ensure feature names are available for SHAP outputs."""
+        if not self.feature_names:
+            self.feature_names = list(X.columns)
 
     def _create_explainer(self, model: Any) -> shap.TreeExplainer:
         """Create a SHAP TreeExplainer from the ML model.
@@ -91,6 +97,7 @@ class ShapExplainer:
         Returns:
             numpy array of SHAP values with shape (n_samples, n_features).
         """
+        self._ensure_feature_names(X)
         cache_key = id(X)
         if self._shap_values_cache is not None and self._cache_key == cache_key:
             return self._shap_values_cache
@@ -152,6 +159,12 @@ class ShapExplainer:
         """
         importance = self.global_feature_importance(X)
         return list(importance.items())[:k]
+
+    def top_features(
+        self, X: pd.DataFrame, n: int = 10
+    ) -> List[Tuple[str, float]]:
+        """Backward-compatible alias used by CLI integration."""
+        return self.get_top_features(X, k=n)
 
     def explain_individual(
         self, sample: pd.Series
@@ -235,6 +248,15 @@ class ShapExplainer:
         plt.close()
 
         logger.info(f"Saved SHAP summary plot to {output_path}")
+
+    def summary_plot(
+        self,
+        X: pd.DataFrame,
+        save_path: str,
+        max_display: int = 20,
+    ) -> None:
+        """Backward-compatible wrapper used by older callers."""
+        self.save_summary_plot(X, save_path, max_display=max_display)
 
     def save_force_plot(
         self,
@@ -345,3 +367,27 @@ class ShapExplainer:
         plt.close()
 
         logger.info(f"Saved SHAP bar plot to {output_path}")
+
+    def export_top_features(
+        self,
+        X: pd.DataFrame,
+        output_path: str,
+        k: int = 10,
+    ) -> pd.DataFrame:
+        """Save top-k global SHAP features to CSV or JSON.
+
+        Returns the saved DataFrame for immediate downstream use.
+        """
+        top_features = self.get_top_features(X, k=k)
+        result = pd.DataFrame(top_features, columns=["feature", "importance"])
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        suffix = output.suffix.lower()
+        if suffix == ".json":
+            result.to_json(output, orient="records", indent=2)
+        else:
+            result.to_csv(output, index=False)
+
+        logger.info("Saved SHAP top-features report to %s", output)
+        return result

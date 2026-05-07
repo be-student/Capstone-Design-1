@@ -7,20 +7,24 @@
 
 ## 1. 고객 세그멘테이션 체계
 
-### 1.1 RFM 기반 8개 세그먼트
+### 1.1 운영용 6+ 세그먼트
 
-`CustomerSegmenter` 클래스는 RFM 점수(1~5점)를 기준으로 고객을 8개 세그먼트로 분류합니다.
+`run_segment`는 churn probability, Uplift Score, CLV를 결합해 `results/segments_6plus.csv`를 만든다.
+RFM 기반 세그먼트는 보조 설명 변수로 유지하지만, 제출용 운영 세그먼트는 아래 6개 이상 체계다.
 
-| 세그먼트 | 한국어명 | 기준 | 리텐션 액션 |
-|---------|---------|------|------------|
-| **vip_loyal** | VIP충성고객 | R≥4, F≥4, M≥4 | exclusive_rewards |
-| **loyal_customer** | 충성고객 | R≥3, F≥4, M≥2 | loyalty_program |
-| **potential_loyalist** | 잠재충성고객 | R≥4, F≥2, M≥2 | engagement_campaign |
-| **at_risk** | 이탈위험고객 | R≤2, F≥3, M≥2 | win_back_campaign |
-| **hibernating** | 휴면고객 | R≤2, F≤2, M≥1 | reactivation_offer |
-| **new_customer** | 신규고객 | R≥4, F≤1, M≤2 | onboarding_sequence |
-| **high_value_at_risk** | 고가치위험군 | R≤3, F≥2, M≥4 | premium_win_back |
-| **bargain_hunter** | 가격민감형 | R≥2, F≥3, M≤2 | targeted_promotion |
+| 세그먼트 | 기준 | 리텐션 액션 |
+|---------|------|------------|
+| **high_value_persuadable** | 상위 20% CLV, Uplift 양수, 이탈확률 높음 | VIP Care, 고가치 쿠폰 |
+| **mid_value_persuadable** | 40~80% CLV, Uplift 양수, 이탈확률 높음 | 쿠폰 + 개인화 메시지 |
+| **low_value_persuadable** | 하위 40% CLV, Uplift 양수, 이탈확률 높음 | 비용 효율 쿠폰/푸시 |
+| **high_value_sure_thing** | 상위 20% CLV, 이탈확률 낮음, Uplift 중립 | 최소 접촉, 관계 유지 |
+| **mid_value_sure_thing** | 40~80% CLV, 이탈확률 낮음, Uplift 중립 | 자동화 저비용 접점 |
+| **low_value_sure_thing** | 하위 40% CLV, 이탈확률 낮음, Uplift 중립 | 자동화 저비용 접점 |
+| **high_value_lost_cause** | 상위 20% CLV, 이탈확률 높음, Uplift 중립 | 원인 분석, 고비용 캠페인 보류 |
+| **mid_value_lost_cause** | 40~80% CLV, 이탈확률 높음, Uplift 중립 | 원인 분석, 저비용 관찰 |
+| **low_value_lost_cause** | 하위 40% CLV, 이탈확률 높음, Uplift 중립 | No Action |
+| **sleeping_dog** | Uplift 음수 | 캠페인 제외 |
+| **new_customer_onboarding** | 가입 초기 고객 | 온보딩 캠페인 |
 
 ### 1.2 Uplift 기반 4-사분면 세그먼트
 
@@ -28,10 +32,10 @@ Uplift Modeling을 통해 추가로 4개의 처우 반응 세그먼트를 도출
 
 | 세그먼트 | 영문명 | Uplift 점수 | 의미 |
 |---------|--------|------------|------|
-| **설득 가능** | Persuadables | 중앙값 이상 양수 | 처우(캠페인) 시 이탈 방지 효과 큼 |
-| **확실한 잔존** | Sure Things | 0 이상 중앙값 미만 | 처우 없이도 잔존 가능성 높음 |
-| **가망 없음** | Lost Causes | 음수 (낮지 않음) | 처우해도 이탈 방지 효과 미미 |
-| **역효과** | Sleeping Dogs | 중앙값 미만 음수 | 처우 시 오히려 이탈 촉진 |
+| **설득 가능** | Persuadables | Uplift > 0.05, 이탈확률 높음 | 처우(캠페인) 시 이탈 방지 효과 큼 |
+| **확실한 잔존** | Sure Things | abs(Uplift) ≤ 0.05, 이탈확률 낮음 | 처우 없이도 잔존 가능성 높음 |
+| **가망 없음** | Lost Causes | abs(Uplift) ≤ 0.05, 이탈확률 높음 | 처우해도 이탈 방지 효과 미미 |
+| **역효과** | Sleeping Dogs | Uplift < 0 | 처우 시 오히려 이탈 촉진 |
 
 ---
 

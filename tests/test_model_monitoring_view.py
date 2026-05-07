@@ -156,6 +156,15 @@ class TestPageRegistration:
         from src.dashboard.utils.dashboard_helpers import get_page_list
         assert "Model Monitoring" in get_page_list()
 
+    def test_app_exports_monitoring_view_renderer(self):
+        from src.dashboard.app import render_model_monitoring as app_renderer
+        from src.dashboard.monitoring_view import (
+            render_model_monitoring as view_renderer,
+        )
+        assert app_renderer is not None
+        assert callable(app_renderer)
+        assert app_renderer.__name__ == view_renderer.__name__
+
 
 # ---------------------------------------------------------------------------
 # Test: render_model_monitoring callable

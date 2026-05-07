@@ -57,7 +57,7 @@ All components are containerized with Docker Compose and tracked via MLflow.
                                  │
 ┌────────────────────────────────▼─────────────────────────────────────────┐
 │                    Pipeline Orchestration (src/pipeline/)                 │
-│              14-stage pipeline with checkpoint/resume support             │
+│              16-stage pipeline with checkpoint/resume support             │
 └──┬──────────┬──────────┬──────────┬──────────┬──────────┬───────────────┘
    │          │          │          │          │          │
    ▼          ▼          ▼          ▼          ▼          ▼
@@ -129,7 +129,7 @@ src/
 │   └── redis_consumer.py            #   Consumes & scores via Redis streams
 │
 ├── pipeline/                        # ORCHESTRATION LAYER
-│   ├── runner.py                    #   14-stage PipelineRunner
+│   ├── runner.py                    #   16-stage PipelineRunner
 │   └── pipeline_state.py           #   Checkpoint state management
 │
 └── dashboard/                       # PRESENTATION LAYER
@@ -228,7 +228,7 @@ The system processes data through a multi-stage pipeline. Each stage produces ar
 | ML/DL Training | `models/*.pkl`, `models/*.pt` | Ensemble, Scoring API, Dashboard |
 | Uplift Modeling | Uplift scores, 4-quadrant segments | Budget Optimizer, Recommendations |
 | CLV Prediction | `results/clv_predictions.csv` | Budget Optimizer, Recommendations |
-| Budget Optimization | `results/budget_allocation.json` | Dashboard, What-if Analyzer |
+| Budget Optimization | `results/budget_results.csv`, `results/budget_whatif.csv` | Dashboard, What-if Analyzer |
 | Cohort Analysis | `results/cohort_retention_curves.png` | Dashboard |
 | Monitoring | `results/monitoring_report.json` | Dashboard, Alerting |
 
@@ -299,7 +299,7 @@ Produces 4-quadrant customer segmentation:
 
 #### 5.3.3 CLV Prediction (`clv_model.py`)
 
-Customer Lifetime Value estimation using Gradient Boosting, inspired by BG/NBD + Gamma-Gamma methodology. Integrates with churn scores for churn-adjusted CLV. Supports budget allocation proportional to customer value.
+Customer Lifetime Value estimation uses an ML-based 12-month value regressor with holdout validation. It integrates with churn scores and uplift scores for churn-adjusted segmentation and budget allocation.
 
 #### 5.3.4 Survival Analysis (`survival_model.py`, `survival_analysis.py`)
 
@@ -423,7 +423,7 @@ Provides real-time scoring via Redis Streams for low-latency inference.
 
 | Module | Class | Purpose |
 |--------|-------|---------|
-| `runner.py` | `PipelineRunner` | Executes the 14-stage pipeline with dependency management, error handling, and checkpoint support |
+| `runner.py` | `PipelineRunner` | Executes the 16-stage pipeline with dependency management, error handling, and checkpoint support |
 | `pipeline_state.py` | `PipelineState` | Persists pipeline state (pending/completed/failed) to enable resume after failure |
 
 **14 Pipeline Stages:**

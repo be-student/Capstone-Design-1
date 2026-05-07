@@ -350,6 +350,33 @@ class TestSegmentSummary:
             assert col in summary.columns, f"Missing {col} in summary"
 
 
+class TestValueUpliftSegmentation:
+    """Test 6+ operational segmentation using churn/uplift/CLV."""
+
+    def test_segment_value_uplift_customers(self, segmenter, sample_rfm_data):
+        df = sample_rfm_data.copy()
+        df["uplift_score"] = np.linspace(-0.2, 0.3, len(df))
+        df["predicted_clv"] = np.linspace(10_000, 500_000, len(df))
+        df["tenure_days"] = np.where(np.arange(len(df)) < 10, 10, 90)
+
+        result = segmenter.segment_value_uplift_customers(df)
+        assert "priority_score" in result.columns
+        assert "segment" in result.columns
+        assert result["segment"].nunique() >= 6
+
+    def test_value_uplift_summary_includes_new_metrics(self, segmenter, sample_rfm_data):
+        df = sample_rfm_data.copy()
+        df["uplift_score"] = np.random.normal(0, 0.1, len(df))
+        df["predicted_clv"] = np.random.lognormal(11, 0.7, len(df))
+        df["tenure_days"] = 120
+
+        segmented = segmenter.segment_value_uplift_customers(df)
+        summary = segmenter.get_segment_summary(segmented)
+        assert "avg_uplift_score" in summary.columns
+        assert "avg_predicted_clv" in summary.columns
+        assert "avg_priority_score" in summary.columns
+
+
 # ---------------------------------------------------------------------------
 # Test: Retention Actions
 # ---------------------------------------------------------------------------

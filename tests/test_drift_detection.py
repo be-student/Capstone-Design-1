@@ -262,6 +262,45 @@ class TestDriftDetector:
         with pytest.raises(RuntimeError, match="fit"):
             detector.detect(production)
 
+
+class TestDriftReportSerialization:
+    @pytest.fixture
+    def sample_data(self):
+        """Create sample reference and production DataFrames."""
+        rng = np.random.RandomState(42)
+        reference = pd.DataFrame({
+            "feature_a": rng.normal(0, 1, 1000),
+            "feature_b": rng.exponential(2, 1000),
+        })
+        production = pd.DataFrame({
+            "feature_a": rng.normal(0, 1, 800),
+            "feature_b": rng.exponential(4, 800),
+        })
+        return reference, production
+
+    def test_to_dict_includes_feature_alerts(self):
+        report = DriftReport(
+            feature_psi={"feat": 0.2},
+            feature_alerts={"feat": DriftAlert(psi_value=0.2)},
+        )
+        payload = report.to_dict()
+        assert "feature_alerts" in payload
+        assert payload["feature_alerts"]["feat"]["psi_value"] == pytest.approx(0.2)
+
+    def test_from_dict_accepts_feature_alerts_key(self):
+        payload = {
+            "feature_psi": {"feat": 0.3},
+            "feature_alerts": {
+                "feat": {
+                    "psi_value": 0.3,
+                    "yellow_threshold": 0.1,
+                    "red_threshold": 0.25,
+                }
+            },
+        }
+        report = DriftReport.from_dict(payload)
+        assert report.feature_alerts["feat"].level == "red"
+
     def test_to_dict_serializable(self, sample_data):
         """DriftReport.to_dict() should return JSON-serializable dict."""
         reference, production = sample_data

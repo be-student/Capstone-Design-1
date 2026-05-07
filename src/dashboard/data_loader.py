@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Default artifacts directory
 DEFAULT_ARTIFACTS_DIR = Path("data/artifacts")
+DEFAULT_RESULTS_DIR = Path("results")
 
 
 class DashboardDataLoader:
@@ -35,11 +36,264 @@ class DashboardDataLoader:
             config: Parsed simulator_config.yaml dict.
         """
         self.config = config
+        dashboard_cfg = config.get("dashboard", {}) or {}
         self.artifacts_dir = Path(
-            config.get("dashboard", {}).get(
-                "artifacts_dir", str(DEFAULT_ARTIFACTS_DIR)
-            )
+            dashboard_cfg.get("artifacts_dir", str(DEFAULT_ARTIFACTS_DIR))
         )
+        self.results_dir = Path(
+            dashboard_cfg.get("results_dir", str(DEFAULT_RESULTS_DIR))
+        )
+        if "results_dir" in dashboard_cfg:
+            self.search_dirs = [self.results_dir, self.artifacts_dir]
+        elif "artifacts_dir" in dashboard_cfg:
+            self.search_dirs = [self.artifacts_dir, self.results_dir]
+        else:
+            self.search_dirs = [self.results_dir, self.artifacts_dir]
+
+    def _resolve_existing_path(self, *candidates: str) -> Optional[Path]:
+        """Find the first existing file across dashboard artifact locations."""
+        for directory in self.search_dirs:
+            for candidate in candidates:
+                path = directory / candidate
+                if path.exists():
+                    return path
+        return None
+
+    def _read_json(self, path: Path) -> Any:
+        with open(path, "r") as f:
+            return json.load(f)
+
+    def _load_metric_timeseries(self, metric_name: str) -> pd.DataFrame:
+        """Load time-series metrics from dedicated files or MLflow exports."""
+        path = self._resolve_existing_path(
+            f"{metric_name}_history.csv",
+            f"{metric_name}_timeseries.csv",
+            "model_performance_timeseries.csv",
+            "model_performance_history.csv",
+        )
+        if path is not None:
+            df = pd.read_csv(path)
+            if "model_type" not in df.columns and "model" in df.columns:
+                df = df.rename(columns={"model": "model_type"})
+            if metric_name in df.columns:
+                cols = [c for c in ["timestamp", "model_type", metric_name] if c in df.columns]
+                return df[cols]
+            value_cols = [
+                c for c in df.columns
+                if c.lower() in {metric_name.lower(), f"{metric_name.lower()}_value"}
+            ]
+            if value_cols:
+                rename_map = {value_cols[0]: metric_name}
+                return df.rename(columns=rename_map)
+
+        runs = self.load_mlflow_runs()
+        if metric_name in runs.columns:
+            cols = [c for c in ["timestamp", "model_type", metric_name] if c in runs.columns]
+            return runs[cols].copy()
+        return pd.DataFrame(columns=["timestamp", "model_type", metric_name])
+
+    def _adapt_budget_results(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Map pipeline budget outputs to dashboard schema."""
+        adapted = df.copy()
+        if "allocated_budget_krw" not in adapted.columns and "allocated_budget" in adapted.columns:
+            adapted["allocated_budget_krw"] = adapted["allocated_budget"]
+        if "expected_revenue_saved_krw" not in adapted.columns:
+            for candidate in ["expected_revenue_saved", "retained_value", "expected_retained_value"]:
+                if candidate in adapted.columns:
+                    adapted["expected_revenue_saved_krw"] = adapted[candidate]
+                    break
+        if "expected_retained" not in adapted.columns:
+            if "customers_treated" in adapted.columns:
+                adapted["expected_retained"] = adapted["customers_treated"]
+            elif "customer_id" in adapted.columns:
+                adapted["expected_retained"] = 1
+        if "roi" not in adapted.columns:
+            spent = adapted.get("allocated_budget_krw", pd.Series(dtype=float)).replace(0, np.nan)
+            revenue = adapted.get("expected_revenue_saved_krw", pd.Series(dtype=float))
+            adapted["roi"] = (revenue / spent).fillna(0.0)
+        if "segment" not in adapted.columns:
+            if "customer_id" in adapted.columns:
+                adapted["segment"] = "all_customers"
+            else:
+                adapted["segment"] = [f"scenario_{i+1}" for i in range(len(adapted))]
+
+        required = [
+            "segment", "allocated_budget_krw", "expected_retained",
+            "expected_revenue_saved_krw", "roi",
+        ]
+        for col in required:
+            if col not in adapted.columns:
+                adapted[col] = 0.0 if col != "segment" else "unknown"
+        return adapted[required]
+
+    def _adapt_clv_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        adapted = df.copy()
+        if "clv_predicted" not in adapted.columns and "predicted_clv" in adapted.columns:
+            adapted["clv_predicted"] = adapted["predicted_clv"]
+        if "segment" not in adapted.columns:
+            adapted["segment"] = "all_customers"
+        segment_path = self._resolve_existing_path("segments_6plus.csv")
+        if segment_path is not None and "customer_id" in adapted.columns:
+            segments = pd.read_csv(segment_path)
+            if {"customer_id", "segment"}.issubset(segments.columns):
+                adapted["customer_id"] = adapted["customer_id"].astype(str)
+                segments["customer_id"] = segments["customer_id"].astype(str)
+                adapted = adapted.drop(columns=["segment"], errors="ignore").merge(
+                    segments[["customer_id", "segment"]],
+                    on="customer_id",
+                    how="left",
+                )
+                adapted["segment"] = adapted["segment"].fillna("all_customers")
+        return adapted
+
+    def _adapt_predictions(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add optional CLV fields expected by dashboard scatter views."""
+        adapted = df.copy()
+        if "clv_predicted" not in adapted.columns:
+            clv_path = self._resolve_existing_path("clv_predictions.csv", "clv_data.csv")
+            if clv_path is not None and "customer_id" in adapted.columns:
+                clv = pd.read_csv(clv_path)
+                if "clv_predicted" not in clv.columns and "predicted_clv" in clv.columns:
+                    clv["clv_predicted"] = clv["predicted_clv"]
+                if {"customer_id", "clv_predicted"}.issubset(clv.columns):
+                    adapted["customer_id"] = adapted["customer_id"].astype(str)
+                    clv["customer_id"] = clv["customer_id"].astype(str)
+                    adapted = adapted.merge(
+                        clv[["customer_id", "clv_predicted"]],
+                        on="customer_id",
+                        how="left",
+                    )
+        if "clv_predicted" not in adapted.columns:
+            adapted["clv_predicted"] = 0.0
+        adapted["clv_predicted"] = adapted["clv_predicted"].fillna(0.0)
+        return adapted
+
+    def _adapt_uplift_results(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Map uplift pipeline output to dashboard schema."""
+        adapted = df.copy()
+        if "treatment_effect" not in adapted.columns:
+            adapted["treatment_effect"] = adapted.get("uplift_score", 0.0)
+        if "segment" not in adapted.columns:
+            adapted["segment"] = "unknown"
+        return adapted
+
+    def _load_survival_from_segments(self) -> Optional[pd.DataFrame]:
+        """Build survival view rows from 6+ segmentation output."""
+        segment_path = self._resolve_existing_path("segments_6plus.csv")
+        if segment_path is None:
+            return None
+        segments = pd.read_csv(segment_path)
+        required = {"customer_id", "segment"}
+        if not required.issubset(segments.columns):
+            return None
+        churn = segments.get(
+            "churn_probability",
+            pd.Series(0.2, index=segments.index),
+        ).astype(float).clip(0.0, 1.0)
+        duration = (
+            365 * (1.0 - churn)
+        ).clip(lower=1).round().astype(int)
+        return pd.DataFrame({
+            "customer_id": segments["customer_id"],
+            "duration_days": duration,
+            "event_observed": (churn >= 0.5).astype(int),
+            "segment": segments["segment"],
+            "survival_probability": (1.0 - churn).clip(0.0, 1.0),
+        })
+
+    def _adapt_model_metrics(self, payload: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+        """Keep only dashboard-ready model metric mappings."""
+        aliases = {
+            "ml_metrics": "ml_model",
+            "ml_model": "ml_model",
+            "dl_metrics": "dl_model",
+            "dl_model": "dl_model",
+            "ensemble_metrics": "ensemble",
+            "ensemble": "ensemble",
+        }
+        adapted: Dict[str, Dict[str, float]] = {}
+        for raw_key, canonical_key in aliases.items():
+            metrics = payload.get(raw_key)
+            if not isinstance(metrics, dict):
+                continue
+            auc = metrics.get("auc", metrics.get("auc_roc"))
+            if auc is None:
+                continue
+            adapted[canonical_key] = {
+                "auc": float(auc),
+                "precision": float(metrics.get("precision", 0.0)),
+                "recall": float(metrics.get("recall", 0.0)),
+                "f1_score": float(metrics.get("f1_score", metrics.get("f1", 0.0))),
+                "accuracy": float(metrics.get("accuracy", 0.0)),
+            }
+        return adapted or self._generate_sample_metrics()
+
+    def _adapt_recommendations(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Map recommendation pipeline outputs to dashboard schema."""
+        adapted = df.copy()
+        if "recommendation_type" not in adapted.columns and "action" in adapted.columns:
+            adapted["recommendation_type"] = adapted["action"]
+        if "recommendation_type" not in adapted.columns and "action_type" in adapted.columns:
+            adapted["recommendation_type"] = adapted["action_type"]
+        if "priority_score" not in adapted.columns:
+            if "score" in adapted.columns:
+                adapted["priority_score"] = adapted["score"]
+            else:
+                adapted["priority_score"] = 0.0
+        if "expected_uplift" not in adapted.columns:
+            adapted["expected_uplift"] = adapted.get("uplift_score", adapted["priority_score"])
+        if "recommended_offer" not in adapted.columns:
+            adapted["recommended_offer"] = adapted["recommendation_type"].astype(str)
+        if "estimated_cost" not in adapted.columns:
+            default_costs = {
+                "email": 1000,
+                "push_notification": 500,
+                "coupon": 5000,
+                "loyalty_points": 3000,
+                "personal_outreach": 20000,
+                "exclusive_offer": 10000,
+                "no_action": 0,
+            }
+            adapted["estimated_cost"] = (
+                adapted["recommendation_type"].astype(str).map(default_costs).fillna(1000)
+            )
+        if "segment" not in adapted.columns:
+            segment_path = self._resolve_existing_path("segments_6plus.csv")
+            if segment_path is not None and "customer_id" in adapted.columns:
+                segments = pd.read_csv(segment_path)
+                if {"customer_id", "segment"}.issubset(segments.columns):
+                    adapted["customer_id"] = adapted["customer_id"].astype(str)
+                    segments["customer_id"] = segments["customer_id"].astype(str)
+                    adapted = adapted.merge(
+                        segments[["customer_id", "segment"]],
+                        on="customer_id",
+                        how="left",
+                    )
+            if "segment" not in adapted.columns:
+                adapted["segment"] = "vip_loyal"
+            else:
+                adapted["segment"] = adapted["segment"].fillna("vip_loyal")
+        adapted["priority_score"] = adapted["priority_score"].clip(0.0, 1.0)
+        adapted["expected_uplift"] = adapted["expected_uplift"].clip(0.0, 1.0)
+        return adapted
+
+    def _adapt_ab_results(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        adapted = dict(payload)
+        if "lift" not in adapted:
+            treatment_rate = adapted.get("treatment_churn_rate", adapted.get("treatment_mean", 0.0))
+            control_rate = adapted.get("control_churn_rate", adapted.get("control_mean", 0.0))
+            adapted["lift"] = (
+                (control_rate - treatment_rate) / abs(control_rate)
+                if control_rate not in (0, None)
+                else 0.0
+            )
+        return adapted
+
+    def _adapt_ab_detailed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from src.models.ab_testing import ABTestFramework
+
+        framework = ABTestFramework(self.config)
+        return framework.to_dashboard_detailed_results(payload)
 
     def load_predictions(self) -> pd.DataFrame:
         """Load churn prediction results.
@@ -48,9 +302,9 @@ class DashboardDataLoader:
             DataFrame with customer_id, churn_probability, risk_level,
             segment, recommended_action, clv_predicted, etc.
         """
-        path = self.artifacts_dir / "churn_predictions.csv"
-        if path.exists():
-            return pd.read_csv(path)
+        path = self._resolve_existing_path("churn_predictions.csv")
+        if path is not None:
+            return self._adapt_predictions(pd.read_csv(path))
 
         # Return sample data if no artifacts exist yet
         return self._generate_sample_predictions()
@@ -62,10 +316,9 @@ class DashboardDataLoader:
             Dict with ml_model, dl_model, ensemble keys, each containing
             auc, precision, recall, f1_score, accuracy.
         """
-        path = self.artifacts_dir / "model_metrics.json"
-        if path.exists():
-            with open(path, "r") as f:
-                return json.load(f)
+        path = self._resolve_existing_path("model_metrics.json")
+        if path is not None:
+            return self._adapt_model_metrics(self._read_json(path))
 
         return self._generate_sample_metrics()
 
@@ -76,10 +329,9 @@ class DashboardDataLoader:
             Dict with experiment_name, treatment/control sizes,
             churn rates, lift, p_value, is_significant, CI.
         """
-        path = self.artifacts_dir / "ab_test_results.json"
-        if path.exists():
-            with open(path, "r") as f:
-                return json.load(f)
+        path = self._resolve_existing_path("ab_test_results.json")
+        if path is not None:
+            return self._adapt_ab_results(self._read_json(path))
 
         return self._generate_sample_ab_results()
 
@@ -90,9 +342,9 @@ class DashboardDataLoader:
             DataFrame with segment, allocated_budget_krw,
             expected_retained, expected_revenue_saved_krw, roi.
         """
-        path = self.artifacts_dir / "budget_results.csv"
-        if path.exists():
-            return pd.read_csv(path)
+        path = self._resolve_existing_path("budget_results.csv", "budget_optimization.csv")
+        if path is not None:
+            return self._adapt_budget_results(pd.read_csv(path))
 
         return self._generate_sample_budget_results()
 
@@ -103,10 +355,13 @@ class DashboardDataLoader:
             DataFrame with customer_id, duration_days, event_observed,
             segment, survival_probability.
         """
-        path = self.artifacts_dir / "survival_data.csv"
-        if path.exists():
+        path = self._resolve_existing_path("survival_data.csv")
+        if path is not None:
             return pd.read_csv(path)
 
+        segmented = self._load_survival_from_segments()
+        if segmented is not None:
+            return segmented
         return self._generate_sample_survival_data()
 
     def load_recommendations(self) -> pd.DataFrame:
@@ -116,9 +371,9 @@ class DashboardDataLoader:
             DataFrame with customer_id, recommendation_type,
             expected_uplift, priority_score, recommended_offer.
         """
-        path = self.artifacts_dir / "recommendations.csv"
-        if path.exists():
-            return pd.read_csv(path)
+        path = self._resolve_existing_path("recommendations.csv")
+        if path is not None:
+            return self._adapt_recommendations(pd.read_csv(path))
 
         return self._generate_sample_recommendations()
 
@@ -129,9 +384,9 @@ class DashboardDataLoader:
             DataFrame with customer_id, uplift_score, treatment_effect,
             segment.
         """
-        path = self.artifacts_dir / "uplift_results.csv"
-        if path.exists():
-            return pd.read_csv(path)
+        path = self._resolve_existing_path("uplift_results.csv")
+        if path is not None:
+            return self._adapt_uplift_results(pd.read_csv(path))
 
         return self._generate_sample_uplift_results()
 
@@ -141,9 +396,9 @@ class DashboardDataLoader:
         Returns:
             DataFrame with customer_id, clv_predicted, segment.
         """
-        path = self.artifacts_dir / "clv_data.csv"
-        if path.exists():
-            return pd.read_csv(path)
+        path = self._resolve_existing_path("clv_data.csv", "clv_predictions.csv")
+        if path is not None:
+            return self._adapt_clv_data(pd.read_csv(path))
 
         return self._generate_sample_clv_data()
 
@@ -153,8 +408,8 @@ class DashboardDataLoader:
         Returns:
             DataFrame with feature, importance columns sorted descending.
         """
-        path = self.artifacts_dir / "feature_importance.csv"
-        if path.exists():
+        path = self._resolve_existing_path("feature_importance.csv")
+        if path is not None:
             df = pd.read_csv(path)
             return df.sort_values("importance", ascending=False).reset_index(
                 drop=True
@@ -338,8 +593,8 @@ class DashboardDataLoader:
             DataFrame with customer_id, event_date, revenue, segment
             suitable for CohortAnalyzer.assign_cohorts().
         """
-        path = self.artifacts_dir / "cohort_data.csv"
-        if path.exists():
+        path = self._resolve_existing_path("cohort_data.csv")
+        if path is not None:
             df = pd.read_csv(path)
             if "event_date" in df.columns:
                 df["event_date"] = pd.to_datetime(df["event_date"])
@@ -354,9 +609,12 @@ class DashboardDataLoader:
             DataFrame with cohort labels as index, period indices as columns,
             and retention rates (0.0 to 1.0) as values.
         """
-        path = self.artifacts_dir / "cohort_retention_matrix.csv"
-        if path.exists():
+        path = self._resolve_existing_path("cohort_retention_matrix.csv")
+        if path is not None:
             df = pd.read_csv(path, index_col=0)
+            if df.shape[0] >= 2 and df.shape[1] >= 2:
+                return df
+            logger.warning("Ignoring incomplete cohort retention matrix at %s", path)
             return df
 
         # Compute from cohort data using CohortAnalyzer
@@ -369,7 +627,9 @@ class DashboardDataLoader:
             analyzer = CohortAnalyzer()
             assigned = analyzer.assign_cohorts(cohort_data, cohort_type="monthly")
             retention = analyzer.compute_retention_matrix(assigned)
-            return retention
+            if retention.shape[0] >= 2 and retention.shape[1] >= 2:
+                return retention
+            return self._generate_sample_retention_matrix()
         except Exception:
             return self._generate_sample_retention_matrix()
 
@@ -434,9 +694,12 @@ class DashboardDataLoader:
             DataFrame with run_id, model_type, auc, precision, recall,
             f1_score, accuracy, training_time_s, timestamp.
         """
-        path = self.artifacts_dir / "mlflow_runs.csv"
-        if path.exists():
-            return pd.read_csv(path)
+        path = self._resolve_existing_path("mlflow_runs.csv")
+        if path is not None:
+            df = pd.read_csv(path)
+            if "model_type" not in df.columns and "model" in df.columns:
+                df = df.rename(columns={"model": "model_type"})
+            return df
         return self._generate_sample_mlflow_runs()
 
     def load_roc_data(self) -> Dict[str, Dict[str, list]]:
@@ -470,10 +733,12 @@ class DashboardDataLoader:
             Dict with experiments list, each containing name, metrics,
             and statistical test details.
         """
-        path = self.artifacts_dir / "ab_test_detailed.json"
-        if path.exists():
-            with open(path, "r") as f:
-                return json.load(f)
+        path = self._resolve_existing_path("ab_test_detailed.json")
+        if path is not None:
+            return self._adapt_ab_detailed(self._read_json(path))
+        path = self._resolve_existing_path("ab_test_results.json")
+        if path is not None:
+            return self._adapt_ab_detailed(self._read_json(path))
         return self._generate_sample_ab_detailed()
 
     def load_survival_curves(self) -> Dict[str, Dict[str, list]]:
@@ -695,10 +960,49 @@ class DashboardDataLoader:
             DataFrame with timestamp, alert_level, num_drifted_features,
             psi_mean, ks_mean columns.
         """
-        path = self.artifacts_dir / "drift_history.csv"
-        if path.exists():
+        path = self._resolve_existing_path("drift_history.csv")
+        if path is not None:
             return pd.read_csv(path)
+
+        report_path = self._resolve_existing_path("monitoring_report.json")
+        if report_path is not None:
+            report = self._read_json(report_path)
+            psi_alerts = (
+                report.get("psi_report", {}).get("feature_alerts")
+                or report.get("psi_report", {}).get("alerts", {})
+            )
+            ks_alerts = (
+                report.get("ks_report", {}).get("feature_alerts")
+                or report.get("ks_report", {}).get("alerts", {})
+            )
+            psi_values = [
+                float(alert.get("psi_value", 0.0))
+                for alert in psi_alerts.values()
+            ]
+            ks_values = [
+                float(alert.get("statistic", 0.0))
+                for alert in ks_alerts.values()
+            ]
+            return pd.DataFrame([{
+                "timestamp": report.get("timestamp"),
+                "alert_level": report.get("overall_alert_level", "green"),
+                "num_drifted_features": len(report.get("drifted_features", [])),
+                "psi_mean": float(np.mean(psi_values)) if psi_values else 0.0,
+                "ks_mean": float(np.mean(ks_values)) if ks_values else 0.0,
+            }])
         return self._generate_sample_drift_history()
+
+    def load_auc_history(self) -> pd.DataFrame:
+        """Load AUC metric time series."""
+        return self._load_metric_timeseries("auc")
+
+    def load_precision_history(self) -> pd.DataFrame:
+        """Load Precision metric time series."""
+        return self._load_metric_timeseries("precision")
+
+    def load_recall_history(self) -> pd.DataFrame:
+        """Load Recall metric time series."""
+        return self._load_metric_timeseries("recall")
 
     def load_scoring_throughput(self) -> pd.DataFrame:
         """Load scoring throughput metrics over time.

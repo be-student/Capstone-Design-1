@@ -14,6 +14,7 @@ Usage:
 """
 
 import os
+import warnings
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -54,6 +55,7 @@ class CustomerDataGenerator:
 
         self.personas = config["personas"]  # list of persona dicts
         self.event_types = config["event_types"]
+        self.small_mode_cfg = sim_cfg.get("small_mode", {})
 
         churn_cfg = config["churn_definition"]
         self.no_purchase_days = churn_cfg["no_purchase_days"]
@@ -62,6 +64,7 @@ class CustomerDataGenerator:
 
         treatment_cfg = config["treatment"]
         self.treatment_ratio = treatment_cfg["treatment_ratio"]
+        self.min_group_size = int(treatment_cfg.get("min_group_size", 0))
 
         self.target_churn_min = config["target_churn_rate"]["min"]
         self.target_churn_max = config["target_churn_rate"]["max"]
@@ -82,6 +85,7 @@ class CustomerDataGenerator:
         customers_df = self._generate_customers()
         events_df = self._generate_all_events(customers_df)
         customers_df = self._label_churn(customers_df, events_df)
+        self._warn_if_target_churn_out_of_range(customers_df)
 
         return {"customers": customers_df, "events": events_df}
 
@@ -123,8 +127,8 @@ class CustomerDataGenerator:
             p=proportions,
         )
 
-        # Assign treatment/control groups
-        treatment_flags = self.rng.random(self.num_customers) < self.treatment_ratio
+        # Assign treatment/control groups with deterministic sizing.
+        treatment_flags = self._assign_treatment_flags()
 
         for i in range(self.num_customers):
             # Signup date: uniformly distributed in first 30% of simulation
@@ -141,6 +145,55 @@ class CustomerDataGenerator:
             })
 
         return pd.DataFrame(records)
+
+    def _assign_treatment_flags(self) -> np.ndarray:
+        """Assign treatment/control flags while honoring feasible minimum sizes."""
+        desired_treatment = int(round(self.num_customers * self.treatment_ratio))
+        desired_treatment = max(0, min(self.num_customers, desired_treatment))
+
+        if self.num_customers >= 2 * self.min_group_size and self.min_group_size > 0:
+            desired_treatment = max(self.min_group_size, desired_treatment)
+            desired_treatment = min(
+                self.num_customers - self.min_group_size,
+                desired_treatment,
+            )
+
+        treatment_flags = np.array(
+            [True] * desired_treatment
+            + [False] * (self.num_customers - desired_treatment),
+            dtype=bool,
+        )
+        self.rng.shuffle(treatment_flags)
+        return treatment_flags
+
+    def infer_generation_mode(self) -> str:
+        """Infer whether current settings should be treated as small mode."""
+        small_customers = int(self.small_mode_cfg.get("num_customers", 0))
+        small_days = int(self.small_mode_cfg.get("simulation_days", 0))
+
+        if self.num_customers < 2 * self.min_group_size:
+            return "small"
+        if small_customers and self.num_customers <= small_customers:
+            return "small"
+        if small_days and self.simulation_days <= small_days:
+            return "small"
+        return "full"
+
+    def _warn_if_target_churn_out_of_range(self, customers_df: pd.DataFrame) -> None:
+        """Emit a warning when generated churn is outside the configured range."""
+        churn_rate = float(customers_df["churn_label"].mean())
+        if self.target_churn_min <= churn_rate <= self.target_churn_max:
+            return
+
+        warnings.warn(
+            (
+                f"Generated churn rate {churn_rate:.2%} is outside target range "
+                f"[{self.target_churn_min:.0%}, {self.target_churn_max:.0%}] "
+                f"for {self.infer_generation_mode()} mode."
+            ),
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     # ------------------------------------------------------------------
     # Event Generation (core behavior simulator)

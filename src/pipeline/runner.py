@@ -21,7 +21,7 @@ from src.pipeline.pipeline_state import PipelineState
 
 logger = logging.getLogger(__name__)
 
-# Canonical pipeline step order (14 stages)
+# Canonical pipeline step order (16 stages)
 PIPELINE_STEP_ORDER: List[str] = [
     "data_generation",
     "preprocessing",
@@ -31,10 +31,12 @@ PIPELINE_STEP_ORDER: List[str] = [
     "ensemble_creation",
     "uplift_modeling",
     "clv_prediction",
+    "customer_segmentation",
     "budget_optimization",
+    "recommendations",
+    "cohort_analysis",
     "ab_testing",
     "survival_analysis",
-    "recommendations",
     "scoring_api_setup",
     "mlflow_logging",
 ]
@@ -372,10 +374,12 @@ class PipelineRunner:
             "ensemble_creation": "train",
             "uplift_modeling": "uplift",
             "clv_prediction": "clv",
+            "customer_segmentation": "segment",
             "budget_optimization": "optimize",
             "ab_testing": "ab_test",
             "survival_analysis": "survival",
             "recommendations": "recommend",
+            "cohort_analysis": "cohort",
             "scoring_api_setup": "monitor",
             "mlflow_logging": "monitor",
         }

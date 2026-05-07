@@ -28,7 +28,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import yaml
 
-from src.dashboard.monitoring_view import render_model_monitoring
+from src.dashboard.monitoring_view import (
+    render_model_monitoring as render_monitoring_view,
+)
 from src.dashboard.recommendations_view import render_recommendations_view
 from src.dashboard.system_health_view import render_system_health
 from src.dashboard.utils.dashboard_helpers import (
@@ -4025,12 +4027,7 @@ def render_model_monitoring(st_module, config: Dict, data_loader=None):
         config: Configuration dictionary.
         data_loader: Optional DashboardDataLoader instance.
     """
-    st = st_module
-    if data_loader is None:
-        data_loader = get_data_loader(config)
-
-    st.header("Model Monitoring")
-    _render_monitoring_tab(st, config, data_loader)
+    return render_monitoring_view(st_module, config, data_loader)
 
 
 def render_mlflow_experiments(st_module, config: Dict, data_loader=None):

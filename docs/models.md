@@ -18,8 +18,8 @@
    - 3.2 [S-Learner](#32-s-learner-single-model-approach)
    - 3.3 [Uplift Segmentation](#33-uplift-segmentation-4-quadrant)
 4. [CLV Prediction](#4-clv-prediction)
-   - 4.1 [BG/NBD + Gamma-Gamma](#41-bgnbd--gamma-gamma-probabilistic)
-   - 4.2 [ML-based CLV](#42-ml-based-clv-regression)
+   - 4.1 [Current Implementation: ML-based CLV Regression](#41-current-implementation-ml-based-clv-regression)
+   - 4.2 [Implementation Notes](#42-implementation-notes)
 5. [Survival Analysis](#5-survival-analysis)
    - 5.1 [Kaplan-Meier Estimator](#51-kaplan-meier-estimator)
    - 5.2 [Cox Proportional Hazards](#52-cox-proportional-hazards)
@@ -60,8 +60,8 @@ Causal Inference (Uplift)
 └── S-Learner (single model with treatment indicator)
 
 CLV Prediction
-├── BG/NBD + Gamma-Gamma (probabilistic)
-└── ML-based CLV (XGBoost regression)
+├── ML-based CLV regression (current)
+└── BG/NBD + Gamma-Gamma (optional extension)
 
 Survival Analysis (Bonus)
 ├── Kaplan-Meier (non-parametric)
@@ -633,28 +633,25 @@ Customer Lifetime Value (CLV) prediction estimates the total revenue a customer 
 
 ---
 
-### 4.1 BG/NBD + Gamma-Gamma (Probabilistic)
+### 4.1 Current Implementation: ML-based CLV Regression
 
-**Type**: Probabilistic / Bayesian Model
-**Library**: `lifetimes`
-**Source**: `src/clv/clv_predictor.py`
+**Type**: Supervised regression
+**Library**: scikit-learn / gradient boosting stack
+**Source**: `src/models/clv_model.py`
 
 #### How It Works
 
-The **BG/NBD** (Beta Geometric / Negative Binomial Distribution) model predicts future transaction frequency, while the **Gamma-Gamma** model estimates average transaction value. Together, they forecast CLV.
+The repository implements the requirement's ML-based option rather than a `lifetimes` BG/NBD package. The pipeline trains a CLV regressor from engineered behavioral and RFM features, validates it on a holdout split, then refits on all available proxy labels before writing customer-level predictions.
 
-**BG/NBD Inputs (RFM)**:
+**Core inputs**:
 - **Frequency**: Number of repeat purchases
-- **Recency**: Time between first and last purchase (in days)
-- **T**: Customer age (time since first purchase)
-
-**Gamma-Gamma Inputs**:
-- **Frequency**: Number of purchases (same as above)
-- **Monetary**: Average order value (KRW)
+- **Recency**: Days since recent activity or purchase
+- **Monetary**: Total or average order value (KRW)
+- **Behavioral features**: session quality, trend, timing, journey, and sequence features
 
 **CLV Formula**:
 ```
-CLV = E[transactions in 12 months] × E[average order value] × profit_margin
+CLV = model.predict(engineered_features), using a 12-month monetary proxy label
 ```
 
 #### Parameters
@@ -665,16 +662,15 @@ CLV = E[transactions in 12 months] × E[average order value] × profit_margin
 | `observation_period` | 12 months | Historical data window |
 | `discount_rate` | 0.01 | Monthly discount rate |
 | `profit_margin` | 0.30 | Estimated profit margin |
-| `penalizer_coef` | 0.001 | L2 penalty for model fitting |
-| `frequency_threshold` | 1 | Minimum purchases for Gamma-Gamma |
+| `high_value_percentile` | 80th percentile | Top-20% high-value flag |
 
 #### Training Process
 
 1. Calculate RFM (Recency, Frequency, Monetary) metrics per customer
-2. Fit BG/NBD model on (frequency, recency, T)
-3. Fit Gamma-Gamma model on (frequency, monetary_value)
-4. Validate: check Gamma-Gamma assumption (no correlation between frequency and monetary)
-5. Predict 12-month CLV for all customers
+2. Build the engineered feature matrix
+3. Train on the first 80% of customers and validate on a 20% holdout
+4. Save actual-vs-predicted validation rows and MAE/RMSE/R² summary
+5. Refit on the full dataset for final customer-level predictions
 6. Identify top-20% high-value customers
 
 #### Evaluation Metrics
@@ -684,33 +680,29 @@ CLV = E[transactions in 12 months] × E[average order value] × profit_margin
 | RMSE | Root mean squared error on holdout period |
 | MAE | Mean absolute error |
 | R² | Coefficient of determination |
-| Top-20% Accuracy | % of true top-20% customers captured |
-| Calibration Plot | Predicted vs. actual repeat transactions |
+| Top-20% Flag | Customers above the 80th percentile predicted CLV |
 
 #### MLflow Tracking
 
 ```
 Experiment: clv_prediction
-Run Name: bgnbd_gamma_{timestamp}
-├── Parameters: prediction_horizon, discount_rate, profit_margin,
-│               penalizer_coef, observation_months
-├── Metrics: rmse, mae, r2_score, top20_accuracy
+Run Name: ml_clv_{timestamp}
+├── Parameters: prediction_horizon, holdout_ratio, feature_set
+├── Metrics: rmse, mae, r2_score
 ├── Artifacts:
-│   ├── bgnbd_model.pkl
-│   ├── gamma_gamma_model.pkl
-│   ├── clv_distribution.png
-│   ├── calibration_plot.png
-│   └── top_customers.csv (top-20% list)
-└── Tags: model_type=bgnbd_gamma, stage=clv
+│   ├── clv_model.pkl
+│   ├── clv_predictions.csv
+│   ├── clv_validation.json
+│   ├── clv_actual_vs_predicted.csv
+│   └── clv_top_customers.csv
+└── Tags: model_type=ml_clv, stage=clv
 ```
 
 ---
 
-### 4.2 ML-based CLV (Regression)
+### 4.2 Implementation Notes
 
-**Type**: Supervised Regression
-**Library**: `xgboost` / `lightgbm`
-**Source**: `src/clv/clv_predictor.py`
+BG/NBD + Gamma-Gamma is a valid future extension, but it is not the code path currently used by `python src/main.py --mode clv`.
 
 #### How It Works
 
@@ -762,7 +754,7 @@ Survival analysis models the **time-to-churn** event, providing richer insights 
 
 **Type**: Non-Parametric Survival Estimator
 **Library**: `lifelines`
-**Source**: `src/survival/survival_analysis.py`
+**Source**: `src/models/survival_analysis.py`
 
 #### How It Works
 
@@ -814,7 +806,7 @@ Run Name: kaplan_meier_{timestamp}
 
 **Type**: Semi-Parametric Regression Model
 **Library**: `lifelines`
-**Source**: `src/survival/survival_analysis.py`
+**Source**: `src/models/survival_analysis.py`
 
 #### How It Works
 
@@ -924,7 +916,7 @@ Run Name: cox_ph_{timestamp}
 │   Weighted average: 0.6 × best_ML + 0.4 × best_DL                  │
 ├─────────────────────────────────────────────────────────────────────┤
 │ Step 7: CLV Prediction                                              │
-│   BG/NBD + Gamma-Gamma → 12-month CLV per customer                 │
+│   ML-based regressor → 12-month CLV per customer                   │
 ├─────────────────────────────────────────────────────────────────────┤
 │ Step 8: Model Monitoring                                            │
 │   PSI + KS-test for data drift detection                            │
@@ -1035,7 +1027,7 @@ All features are documented in detail in `docs/feature_dictionary.md`. Summary:
 
 | Setting | Value |
 |---------|-------|
-| Server URL | `http://localhost:5000` |
+| Server URL | `http://localhost:5001` from host, `http://mlflow:5000` inside Docker |
 | Backend Store | SQLite (`mlruns/mlruns.db`) |
 | Artifact Store | Local directory (`mlruns/artifacts/`) |
 | Container | `mlflow` service in Docker Compose |
@@ -1043,7 +1035,7 @@ All features are documented in detail in `docs/feature_dictionary.md`. Summary:
 ### Experiment Organization
 
 ```
-MLflow Server (http://localhost:5000)
+MLflow Server (host http://localhost:5001, Docker http://mlflow:5000)
 ├── Experiment: churn_prediction
 │   ├── Run: xgboost_{timestamp}
 │   ├── Run: lightgbm_{timestamp}
@@ -1056,7 +1048,6 @@ MLflow Server (http://localhost:5000)
 │   └── Run: s_learner_{timestamp}
 │
 ├── Experiment: clv_prediction
-│   ├── Run: bgnbd_gamma_{timestamp}
 │   └── Run: ml_clv_{timestamp}
 │
 └── Experiment: survival_analysis
@@ -1079,7 +1070,7 @@ For every model run, MLflow captures:
 ```python
 import mlflow
 
-mlflow.set_tracking_uri("http://localhost:5000")
+mlflow.set_tracking_uri("http://localhost:5001")
 mlflow.set_experiment("churn_prediction")
 
 with mlflow.start_run(run_name=f"xgboost_{timestamp}"):
@@ -1179,9 +1170,4 @@ All parameters are managed via YAML files in the `config/` folder:
 
 | File | Contents |
 |------|----------|
-| `config/simulator_config.yaml` | Simulation, churn definition, personas, pipeline, budget |
-| `config/feature_config.yaml` | Feature groups, scaling, imputation |
-| `config/model_config.yaml` | ML/DL hyperparameters, ensemble weights |
-| `config/uplift_config.yaml` | Uplift learner type, segmentation thresholds |
-| `config/optimization_config.yaml` | Budget constraints, LP solver settings |
-| `config/dashboard_config.yaml` | Streamlit page layout, refresh interval |
+| `config/simulator_config.yaml` | Simulation, churn definition, personas, feature/model/uplift/budget/dashboard settings |

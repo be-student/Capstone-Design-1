@@ -89,6 +89,13 @@ class TestConfigLoading:
         """Config must specify a random seed for reproducibility."""
         assert "random_seed" in config["simulation"]
 
+    def test_small_mode_matches_requirement(self, config):
+        """small_mode must match the 5,000 customers / 6 months requirement."""
+        small_mode = config["simulation"]["small_mode"]
+        assert small_mode["num_customers"] == 5000
+        assert small_mode["simulation_months"] == 6
+        assert small_mode["simulation_days"] == 180
+
     def test_config_churn_definition(self, config):
         """Churn definition must have no_purchase_days and no_login_days."""
         churn_def = config["churn_definition"]
@@ -197,6 +204,26 @@ class TestTreatmentControlGroups:
         assert treatment_count >= min_per_group
         assert control_count >= min_per_group
 
+    def test_generator_marks_reduced_test_run_as_small_mode(self, config):
+        """Reduced local/unit runs should be treated as small mode."""
+        from src.data.generator import CustomerDataGenerator
+
+        config["simulation"]["num_customers"] = 200
+        config["simulation"]["simulation_days"] = 90
+        generator = CustomerDataGenerator(config)
+
+        assert generator.infer_generation_mode() == "small"
+
+    def test_generator_can_reach_full_mode_when_feasible(self, config):
+        """Requirement-sized runs should be classified as full mode."""
+        from src.data.generator import CustomerDataGenerator
+
+        config["simulation"]["num_customers"] = 20000
+        config["simulation"]["simulation_days"] = 365
+        generator = CustomerDataGenerator(config)
+
+        assert generator.infer_generation_mode() == "full"
+
 
 class TestEventGeneration:
     """Test event log generation."""
@@ -289,6 +316,24 @@ class TestChurnLabeling:
         assert no_purchase_days > 0
         assert no_login_days > 0
         assert generated_data["customers"]["churn_label"].notna().all()
+
+    def test_orchestrator_summary_flags_small_mode_validation_skip(self, config, tmp_path):
+        """Small-mode summaries should explicitly note skipped 10k/group validation."""
+        from src.data.orchestrator import SimulatorOrchestrator
+
+        config["simulation"]["num_customers"] = 200
+        config["simulation"]["simulation_days"] = 90
+        orchestrator = SimulatorOrchestrator(config)
+
+        result = orchestrator.run(str(tmp_path / "raw"))
+        validation = result["summary"]["validation"]
+
+        assert validation["mode"] == "small"
+        assert validation["group_size_check"]["passed"] is False
+        assert any(
+            "Small mode summary only" in warning
+            for warning in validation["warnings"]
+        )
 
 
 class TestTemporalBehavior:
