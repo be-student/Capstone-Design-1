@@ -263,10 +263,116 @@ class CLVModel:
                 "mae": mae,
                 "rmse": rmse,
                 "correlation": correlation,
+                "validation_type": "actual_vs_predicted_holdout",
             },
             "predictions": report,
             "top_n": report.head(top_n).copy(),
         }
+
+    @staticmethod
+    def future_revenue_labels(
+        events: pd.DataFrame,
+        cutoff_date: Union[str, pd.Timestamp],
+        customer_ids: Optional[Sequence[str]] = None,
+        date_column: Optional[str] = None,
+        amount_column: Optional[str] = None,
+        event_type_column: str = "event_type",
+        purchase_event: str = "purchase",
+        annualize_to_days: int = 365,
+    ) -> Dict[str, Any]:
+        """Build future-window revenue labels from post-cutoff purchases.
+
+        This helper keeps the CLV target separate from observation-window
+        features: callers compute features using events up to ``cutoff_date``
+        and use this method to derive actual future revenue labels from events
+        after the cutoff.
+        """
+        if events.empty:
+            raise ValueError("events must contain at least one row.")
+        if "customer_id" not in events.columns:
+            raise ValueError("events must include customer_id.")
+
+        date_col = date_column
+        if date_col is None:
+            if "event_date" in events.columns:
+                date_col = "event_date"
+            elif "event_timestamp" in events.columns:
+                date_col = "event_timestamp"
+            else:
+                raise ValueError("events must include event_date or event_timestamp.")
+
+        amount_col = amount_column
+        if amount_col is None:
+            if "amount" in events.columns:
+                amount_col = "amount"
+            elif "revenue" in events.columns:
+                amount_col = "revenue"
+            else:
+                raise ValueError("events must include amount or revenue.")
+
+        work = events.copy()
+        work[date_col] = pd.to_datetime(work[date_col])
+        cutoff = pd.Timestamp(cutoff_date)
+        future = work[work[date_col] > cutoff].copy()
+        if event_type_column in future.columns:
+            future = future[future[event_type_column].astype(str) == purchase_event]
+
+        max_date = work[date_col].max()
+        future_days = max(1, int((max_date - cutoff).days))
+        annualization_factor = float(annualize_to_days) / float(future_days)
+
+        if future.empty:
+            revenue = pd.Series(dtype=np.float64)
+        else:
+            revenue = future.groupby("customer_id")[amount_col].sum().astype(np.float64)
+
+        if customer_ids is None:
+            index = pd.Index(work["customer_id"].drop_duplicates(), name="customer_id")
+        else:
+            index = pd.Index(customer_ids, name="customer_id")
+
+        labels = (
+            revenue.reindex(index, fill_value=0.0).astype(np.float64)
+            * annualization_factor
+        )
+        label_df = labels.reset_index(name="future_revenue_12m_actual")
+
+        metadata = {
+            "target": "future_revenue_12m_actual",
+            "validation_type": "temporal_actual_vs_predicted",
+            "observation_window_end": cutoff.date().isoformat(),
+            "future_window_start": (cutoff + pd.Timedelta(days=1)).date().isoformat(),
+            "future_window_end": pd.Timestamp(max_date).date().isoformat(),
+            "label_window_days": int(future_days),
+            "annualization_factor": annualization_factor,
+            "future_purchase_rows": int(len(future)),
+        }
+
+        return {"labels": label_df, "metadata": metadata}
+
+    def evaluate_temporal_holdout(
+        self,
+        X_observation: pd.DataFrame,
+        events: pd.DataFrame,
+        cutoff_date: Union[str, pd.Timestamp],
+        customer_ids: Sequence[str],
+        top_n: int = 20,
+    ) -> Dict[str, Any]:
+        """Evaluate predictions against actual post-cutoff purchase revenue."""
+        label_bundle = self.future_revenue_labels(
+            events=events,
+            cutoff_date=cutoff_date,
+            customer_ids=customer_ids,
+        )
+        labels = label_bundle["labels"]
+        holdout = self.evaluate_holdout(
+            X_observation,
+            labels["future_revenue_12m_actual"],
+            customer_ids=labels["customer_id"],
+            top_n=top_n,
+        )
+        holdout["metrics"].update(label_bundle["metadata"])
+        return holdout
 
     def build_value_report(
         self,

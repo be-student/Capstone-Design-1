@@ -11,6 +11,8 @@ Tests cover:
 - Edge cases (empty data, single customer)
 """
 
+import argparse
+import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -357,12 +359,16 @@ class TestValueUpliftSegmentation:
         df = sample_rfm_data.copy()
         df["uplift_score"] = np.linspace(-0.2, 0.3, len(df))
         df["predicted_clv"] = np.linspace(10_000, 500_000, len(df))
+        df["churn_probability"] = np.tile([0.15, 0.65, 0.72, 0.30], len(df) // 4)
         df["tenure_days"] = np.where(np.arange(len(df)) < 10, 10, 90)
 
         result = segmenter.segment_value_uplift_customers(df)
         assert "priority_score" in result.columns
         assert "segment" in result.columns
+        assert {"high_value", "high_churn", "positive_uplift"}.issubset(result.columns)
         assert result["segment"].nunique() >= 6
+        persuadable = result[result["segment"].str.endswith("_persuadable")]
+        assert (persuadable["high_churn"] & persuadable["positive_uplift"]).all()
 
     def test_value_uplift_summary_includes_new_metrics(self, segmenter, sample_rfm_data):
         df = sample_rfm_data.copy()
@@ -375,6 +381,127 @@ class TestValueUpliftSegmentation:
         assert "avg_uplift_score" in summary.columns
         assert "avg_predicted_clv" in summary.columns
         assert "avg_priority_score" in summary.columns
+
+    def test_high_value_actionable_evidence_report_present(self, segmenter, sample_rfm_data):
+        df = sample_rfm_data.copy()
+        df["uplift_score"] = np.linspace(-0.1, 0.3, len(df))
+        df["predicted_clv"] = np.linspace(10_000, 1_000_000, len(df))
+        df["churn_probability"] = np.where(np.arange(len(df)) >= 160, 0.75, 0.25)
+        df["tenure_days"] = 120
+
+        segmented = segmenter.segment_value_uplift_customers(df)
+        evidence = segmented.attrs["high_value_actionable_evidence"]
+        validation = segmenter.validate_value_uplift_evidence(evidence)
+
+        assert evidence["high_value_persuadable_count"] > 0
+        assert evidence["high_value_actionable_count"] > 0
+        assert evidence["actionable_samples"]
+        assert evidence["absence_report"] is None
+        assert validation["valid"] is True
+
+    def test_high_value_actionable_absence_report_validates(self, segmenter, sample_rfm_data):
+        df = sample_rfm_data.copy()
+        df["uplift_score"] = 0.01
+        df["predicted_clv"] = np.linspace(10_000, 1_000_000, len(df))
+        df["churn_probability"] = 0.20
+        df["tenure_days"] = 120
+
+        segmented = segmenter.segment_value_uplift_customers(df)
+        evidence = segmented.attrs["high_value_actionable_evidence"]
+        validation = segmenter.validate_value_uplift_evidence(evidence)
+
+        assert evidence["high_value_actionable_count"] == 0
+        assert evidence["absence_report"]["thresholds"]["high_churn_threshold"] == pytest.approx(0.5)
+        assert evidence["absence_report"]["counts"]["high_value_count"] > 0
+        assert evidence["absence_reason"]
+        assert validation == {
+            "valid": True,
+            "reason": "structured_absence_report_present",
+        }
+
+    def test_missing_high_value_actionable_and_absence_fails_validation(self, segmenter):
+        validation = segmenter.validate_value_uplift_evidence({
+            "high_value_persuadable_count": 0,
+            "high_value_lost_cause_count": 0,
+            "high_value_actionable_count": 0,
+        })
+        assert validation["valid"] is False
+
+    def test_run_segment_persists_structured_absence_report(self, tmp_path, segmentation_config):
+        from src import main
+
+        main._FEATURE_CACHE = None
+        data_dir = tmp_path / "data" / "raw"
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        data_dir.mkdir(parents=True)
+        results_dir.mkdir()
+
+        n = 40
+        customers = pd.DataFrame({
+            "customer_id": [f"C{i:04d}" for i in range(n)],
+            "signup_date": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "persona": ["regular_loyal"] * n,
+            "churn_label": [0] * n,
+            "treatment_group": ["treatment" if i % 2 == 0 else "control" for i in range(n)],
+        })
+        events = pd.DataFrame({
+            "customer_id": np.repeat(customers["customer_id"].values, 2),
+            "event_date": pd.date_range("2024-02-01", periods=n * 2, freq="D"),
+            "event_type": ["purchase", "page_view"] * n,
+            "amount": np.tile([50000.0, 0.0], n),
+        })
+        pd.DataFrame({
+            "customer_id": customers["customer_id"],
+            "churn_probability": [0.2] * n,
+        }).to_csv(results_dir / "churn_predictions.csv", index=False)
+        pd.DataFrame({
+            "customer_id": customers["customer_id"],
+            "uplift_score": [0.01] * n,
+        }).to_csv(results_dir / "uplift_results.csv", index=False)
+        pd.DataFrame({
+            "customer_id": customers["customer_id"],
+            "predicted_clv": np.linspace(10000, 1000000, n),
+        }).to_csv(results_dir / "clv_predictions.csv", index=False)
+        customers.to_csv(data_dir / "customers.csv", index=False)
+        events.to_csv(data_dir / "events.csv", index=False)
+
+        config = {
+            "simulation": {"start_date": "2024-01-01", "simulation_days": 120},
+            "segmentation": segmentation_config,
+            "dashboard": {"artifacts_dir": str(artifacts_dir)},
+        }
+        args = argparse.Namespace(data=str(data_dir), output=str(tmp_path))
+
+        main.run_segment(config, args)
+
+        payload = json.loads((results_dir / "segment_validation.json").read_text())
+        assert payload["high_value_persuadable_count"] == 0
+        assert payload["high_value_lost_cause_count"] == 0
+        assert payload["absence_reason"]
+        assert payload["absence_report"]["counts"]["high_value_count"] > 0
+        assert payload["validation"] == {
+            "valid": True,
+            "reason": "structured_absence_report_present",
+        }
+        assert (artifacts_dir / "segment_validation.json").exists()
+
+    def test_segment_artifact_validation_rejects_sure_thing_without_absence(self, tmp_path):
+        from src.main import _validate_required_artifact
+
+        path = tmp_path / "segment_validation.json"
+        path.write_text(json.dumps({
+            "high_value_persuadable_count": 0,
+            "high_value_lost_cause_count": 0,
+            "high_value_sure_thing_count": 5,
+            "absence_reason": None,
+        }))
+
+        validation = _validate_required_artifact("segment_validation.json", path)
+        assert validation == {
+            "valid": False,
+            "reason": "missing_high_value_segment_evidence",
+        }
 
 
 # ---------------------------------------------------------------------------

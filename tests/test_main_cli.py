@@ -48,6 +48,15 @@ from src.main import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def isolated_cli_artifact_dirs(tmp_path, monkeypatch):
+    """Keep CLI tests from publishing fixture artifacts into repo defaults."""
+    monkeypatch.setattr("src.main.DEFAULT_DATA_DIR", tmp_path / "data" / "raw")
+    monkeypatch.setattr("src.main.DEFAULT_RESULTS_DIR", tmp_path / "results")
+    monkeypatch.setattr("src.main.DEFAULT_MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr("src.main.DEFAULT_ARTIFACTS_DIR", tmp_path / "artifacts")
+
+
 @pytest.fixture
 def sample_config():
     """Minimal valid config dict."""

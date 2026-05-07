@@ -5,6 +5,16 @@ import argparse
 import pytest
 from unittest.mock import MagicMock
 
+import pandas as pd
+
+import src.main as main_mod
+from src.pipeline.artifact_validation import (
+    ArtifactValidationError,
+    sync_and_validate_artifacts,
+    validate_artifact_mirror,
+    validate_cohort_artifacts,
+    validate_generation_summary,
+)
 from src.pipeline.runner import PipelineRunner, PIPELINE_STEP_ORDER
 
 
@@ -135,6 +145,24 @@ class TestResume:
         assert result["status"] == "completed"
         handler.assert_called_once()
 
+    def test_resume_fail_fast_does_not_run_downstream_steps(self, runner):
+        """resume() must stop immediately when a stage fails."""
+        fail_handler = MagicMock(side_effect=ValueError("boom"))
+        downstream_handler = MagicMock(return_value={"status": "ok"})
+        runner._step_order = ["step_a", "step_b"]
+        runner._step_handlers = {
+            "step_a": fail_handler,
+            "step_b": downstream_handler,
+        }
+
+        with pytest.raises(RuntimeError, match="boom"):
+            runner.resume()
+
+        downstream_handler.assert_not_called()
+        state = runner.get_state()
+        assert state["stages"]["step_a"]["status"] == "failed"
+        assert "step_b" not in state["stages"]
+
 
 class TestRunForce:
     """Test run with force reset."""
@@ -220,3 +248,352 @@ class TestCanonicalStepOrder:
         cohort_idx = PIPELINE_STEP_ORDER.index("cohort_analysis")
         ab_idx = PIPELINE_STEP_ORDER.index("ab_testing")
         assert ab_idx > cohort_idx
+
+
+class TestPipelineArtifactValidation:
+    """Test full/small evidence and dashboard artifact trust checks."""
+
+    def test_generation_summary_rejects_small_mode(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "generation_summary.json").write_text(
+            json.dumps({
+                "generation_mode": "small",
+                "num_customers": 5000,
+                "treatment_count": 2500,
+                "control_count": 2500,
+                "churn_rate": 0.2,
+                "validation": {
+                    "group_size_check": {"passed": False},
+                    "target_churn_check": {"passed": True},
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        result = validate_generation_summary(data_dir)
+
+        assert result["valid"] is False
+        assert result["evidence_size"] == "small"
+        assert result["reason"] == "full_mode_generation_required"
+
+    def test_generation_summary_accepts_full_mode(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "generation_summary.json").write_text(
+            json.dumps({
+                "generation_mode": "full",
+                "num_customers": 20000,
+                "treatment_count": 10000,
+                "control_count": 10000,
+                "churn_rate": 0.2,
+                "validation": {
+                    "group_size_check": {"passed": True},
+                    "target_churn_check": {"passed": True},
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        result = validate_generation_summary(data_dir)
+
+        assert result["valid"] is True
+        assert result["evidence_size"] == "full"
+
+    def test_sync_and_validate_artifacts_copies_and_checks_hash_schema_rows(
+        self, tmp_path
+    ):
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir.mkdir()
+        pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "uplift_score": [0.1, 0.2],
+        }).to_csv(results_dir / "uplift_results.csv", index=False)
+
+        summary = sync_and_validate_artifacts(
+            results_dir,
+            artifacts_dir,
+            ["uplift_results.csv"],
+            required_columns={"uplift_results.csv": ["customer_id", "uplift_score"]},
+            expected_row_counts={"uplift_results.csv": 2},
+            strict=True,
+        )
+
+        row = summary["artifacts"][0]
+        assert summary["valid"] is True
+        assert row["hash_match"] is True
+        assert row["results_row_count"] == 2
+        assert (artifacts_dir / "uplift_results.csv").exists()
+
+    def test_artifact_mirror_rejects_stale_dashboard_copy(self, tmp_path):
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir.mkdir()
+        artifacts_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2"]}).to_csv(
+            results_dir / "recommendations.csv", index=False
+        )
+        pd.DataFrame({"customer_id": ["C1"]}).to_csv(
+            artifacts_dir / "recommendations.csv", index=False
+        )
+
+        result = validate_artifact_mirror(
+            results_dir / "recommendations.csv",
+            artifacts_dir / "recommendations.csv",
+            expected_row_count=2,
+        )
+
+        assert result["valid"] is False
+        assert result["reason"] == "mirror_hash_mismatch"
+
+    def test_required_checklist_does_not_hide_stale_mirror_hash(
+        self, tmp_path, monkeypatch
+    ):
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        data_dir = tmp_path / "data"
+        results_dir.mkdir()
+        artifacts_dir.mkdir()
+        data_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2"]}).to_csv(
+            results_dir / "recommendations.csv", index=False
+        )
+        pd.DataFrame({"customer_id": ["stale"]}).to_csv(
+            artifacts_dir / "recommendations.csv", index=False
+        )
+
+        monkeypatch.setattr(
+            main_mod, "REQUIRED_PIPELINE_ARTIFACTS", ["recommendations.csv"]
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "_validate_generation_summary",
+            lambda _: {"valid": True, "reason": "ok"},
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "_validate_required_artifact",
+            lambda *_args, **_kwargs: {"valid": True},
+        )
+
+        checklist = main_mod._write_artifact_checklist(
+            {"dashboard": {"artifacts_dir": str(artifacts_dir)}},
+            results_dir,
+            data_dir,
+        )
+
+        row = checklist["artifacts"][0]
+        assert row["mirror_hash_match"] is False
+        assert row["satisfied"] is False
+        assert checklist["full_submission_ready"] is False
+        assert pd.read_csv(artifacts_dir / "recommendations.csv")[
+            "customer_id"
+        ].tolist() == ["stale"]
+
+    def test_run_all_fails_when_checklist_not_full_ready_even_without_missing(
+        self, tmp_path, monkeypatch
+    ):
+        class FakeRunner:
+            def __init__(self, *args, **kwargs):
+                self._state = MagicMock()
+                self._state.reset = MagicMock()
+                self._state._save_state = MagicMock()
+
+            def get_step_order(self):
+                return ["data_generation"]
+
+            def get_state(self):
+                return {"stages": {}, "run_context": None}
+
+            def register_step(self, *_args, **_kwargs):
+                return None
+
+            def resume(self, _args):
+                return {"status": "completed"}
+
+        args = argparse.Namespace(
+            small=False,
+            data=str(tmp_path / "data"),
+            output=str(tmp_path / "results"),
+        )
+        monkeypatch.setattr("src.pipeline.runner.PipelineRunner", FakeRunner)
+        monkeypatch.setattr(
+            main_mod,
+            "_write_artifact_checklist",
+            lambda *_args, **_kwargs: {
+                "full_submission_ready": False,
+                "missing": [],
+                "generation_summary_validation": {
+                    "valid": False,
+                    "reason": "full_mode_generation_required",
+                },
+                "artifacts": [],
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="Full submission checklist failed"):
+            main_mod.run_all({"simulation": {"num_customers": 20_000}}, args)
+
+    def test_cohort_artifacts_reject_errors_null_milestone_and_short_sequences(
+        self, tmp_path
+    ):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        (results_dir / "cohort_analysis.json").write_text(
+            json.dumps({
+                "status": "failed",
+                "errors": ["retention_matrix_requires_multiple_periods"],
+                "churn_sequences_saved": True,
+                "pre_churn_events_saved": True,
+                "journey_funnel_saved": True,
+            }),
+            encoding="utf-8",
+        )
+        pd.DataFrame({"cohort": ["2024-01"], "0": [1.0]}).to_csv(
+            results_dir / "cohort_retention_matrix.csv", index=False
+        )
+        pd.DataFrame({
+            "cohort": ["2024-01"],
+            "M1": [None],
+            "M3": [None],
+            "M6": [None],
+            "M12": [None],
+        }).to_csv(results_dir / "cohort_milestones.csv", index=False)
+        (results_dir / "churn_last30_sequences.json").write_text(
+            json.dumps([["search -> purchase", 1]]),
+            encoding="utf-8",
+        )
+        pd.DataFrame({"event_type": ["cs_contact"]}).to_csv(
+            results_dir / "pre_churn_events.csv", index=False
+        )
+        pd.DataFrame({"stage": ["Signup"]}).to_csv(
+            results_dir / "journey_funnel.csv", index=False
+        )
+
+        result = validate_cohort_artifacts(results_dir)
+
+        assert result["valid"] is False
+        assert "cohort_analysis_failed" in result["errors"]
+        assert "retention_matrix_requires_multiple_periods" in result["errors"]
+        assert "null_milestone_M1" in result["errors"]
+        assert "churn_sequences_requires_top5_patterns" in result["errors"]
+        with pytest.raises(ArtifactValidationError):
+            validate_cohort_artifacts(results_dir, strict=True)
+
+    def test_cohort_validation_rejects_fallback_milestones_and_weak_sequences(
+        self, tmp_path
+    ):
+        data_dir = tmp_path / "data"
+        results_dir = tmp_path / "results"
+        data_dir.mkdir()
+        results_dir.mkdir()
+        pd.DataFrame({"customer_id": [f"C{i}" for i in range(10)]}).to_csv(
+            data_dir / "customers.csv", index=False
+        )
+        (results_dir / "cohort_analysis.json").write_text(
+            json.dumps({
+                "status": "completed",
+                "errors": [],
+                "retention_matrix_shape": [1, 5],
+                "exact_milestones": [1, 3],
+                "fallback_milestones": ["M6", "M12"],
+                "churn_sequences_saved": True,
+                "pre_churn_events_saved": True,
+                "journey_funnel_saved": True,
+            }),
+            encoding="utf-8",
+        )
+        pd.DataFrame({"cohort": ["2024-01"], "0": [1.0], "1": [0.8]}).to_csv(
+            results_dir / "cohort_retention_matrix.csv", index=False
+        )
+        pd.DataFrame({
+            "cohort": ["2024-01"],
+            "M1": [0.8],
+            "M3": [0.7],
+            "M6": [0.7],
+            "M12": [0.7],
+        }).to_csv(results_dir / "cohort_milestones.csv", index=False)
+        (results_dir / "churn_last30_sequences.json").write_text(
+            json.dumps([
+                ["a", 1], ["b", 1], ["c", 1], ["d", 1], ["e", 1],
+            ]),
+            encoding="utf-8",
+        )
+        pd.DataFrame({
+            "event_type": ["cs_contact"],
+            "churned_freq": [1.0],
+            "active_freq": [0.2],
+            "freq_ratio": [5.0],
+        }).to_csv(results_dir / "pre_churn_events.csv", index=False)
+        pd.DataFrame({
+            "stage": [
+                "Signup", "First Purchase", "Repeat Purchase", "Loyal", "Churned",
+            ],
+            "count": [9, 8, 5, 2, 1],
+            "conversion_rate": [1.0, 0.8, 0.5, 0.2, 0.1],
+            "drop_off_rate": [0.0, 0.2, 0.3, 0.3, 0.1],
+        }).to_csv(results_dir / "journey_funnel.csv", index=False)
+
+        result = validate_cohort_artifacts(results_dir, data_dir=data_dir)
+
+        assert result["valid"] is False
+        assert "missing_exact_retention_milestones: M6,M12" in result["errors"]
+        assert (
+            "fallback_retention_milestones_not_submission_evidence: M6,M12"
+            in result["errors"]
+        )
+        assert "churn_sequences_observations_too_small: 5" in result["errors"]
+        assert "journey_signup_count_mismatch: 9_expected_10" in result["errors"]
+
+    def test_failed_cohort_run_invalidates_stale_required_checklist(
+        self, tmp_path, monkeypatch
+    ):
+        data_dir = tmp_path / "data" / "raw"
+        output_dir = tmp_path / "output"
+        results_dir = output_dir / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir.mkdir(parents=True)
+        stale = {"full_submission_ready": True, "stale": True}
+        (results_dir / "required_artifacts_checklist.json").write_text(
+            json.dumps(stale),
+            encoding="utf-8",
+        )
+
+        customers = pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "signup_date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "churn_label": [1, 0],
+        })
+        events = pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "event_date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "event_type": ["purchase", "page_view"],
+            "amount": [100.0, 0.0],
+            "revenue": [100.0, 0.0],
+        })
+        args = argparse.Namespace(
+            data=str(data_dir),
+            output=str(output_dir),
+            cohort_type="monthly",
+        )
+        config = {"dashboard": {"artifacts_dir": str(artifacts_dir)}}
+        monkeypatch.setattr(main_mod, "_load_customers", lambda _data_dir: customers)
+        monkeypatch.setattr(main_mod, "_load_events", lambda _data_dir: events)
+
+        with pytest.raises(RuntimeError, match="Cohort analysis required outputs failed"):
+            main_mod.run_cohort(config, args)
+
+        checklist = json.loads(
+            (results_dir / "required_artifacts_checklist.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert checklist["full_submission_ready"] is False
+        assert "cohort_analysis.json" in checklist["missing"]
+        cohort_row = next(
+            row for row in checklist["artifacts"]
+            if row["artifact"] == "cohort_analysis.json"
+        )
+        assert cohort_row["validation"]["reason"] == "invalid_cohort_artifacts"
+        assert (artifacts_dir / "required_artifacts_checklist.json").exists()

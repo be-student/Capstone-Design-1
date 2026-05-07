@@ -394,7 +394,38 @@ class TestCustomerRanking:
             customer_ids=test["customer_id"],
         )
         assert "mae" in report["metrics"]
+        assert report["metrics"]["validation_type"] == "actual_vs_predicted_holdout"
         assert len(report["top_n"]) > 0
+
+    def test_future_revenue_labels_schema_and_metadata(self, sample_clv_data):
+        """Future labels should encode actual post-observation revenue evidence."""
+        from src.models.clv_model import CLVModel
+
+        events = pd.DataFrame({
+            "customer_id": ["C00000", "C00000", "C00001", "C00002"],
+            "event_timestamp": [
+                "2024-01-01",
+                "2024-04-01",
+                "2024-04-15",
+                "2024-01-20",
+            ],
+            "event_type": ["purchase", "purchase", "purchase", "purchase"],
+            "revenue": [1000.0, 5000.0, 3000.0, 7000.0],
+        })
+
+        bundle = CLVModel.future_revenue_labels(
+            events,
+            cutoff_date="2024-03-01",
+            customer_ids=["C00000", "C00001", "C00002"],
+        )
+
+        labels = bundle["labels"]
+        assert list(labels.columns) == ["customer_id", "future_revenue_12m_actual"]
+        assert bundle["metadata"]["target"] == "future_revenue_12m_actual"
+        assert bundle["metadata"]["future_purchase_rows"] == 2
+        assert labels.loc[
+            labels["customer_id"] == "C00002", "future_revenue_12m_actual"
+        ].iloc[0] == 0
 
     def test_value_report_contains_high_value_flag(self, clv_model, sample_clv_data):
         """Top-N/distribution helper should create a high-value cut."""

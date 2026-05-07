@@ -22,7 +22,7 @@ Usage:
     actions = segmenter.get_retention_actions(result)
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -395,7 +395,7 @@ class CustomerSegmenter:
         cluster_names = self._name_kmeans_clusters(
             data, labels, actual_k
         )
-        result["segment"] = [cluster_names[l] for l in labels]
+        result["segment"] = [cluster_names[label] for label in labels]
 
         for col in rfm_cols:
             result[col] = data[col].values
@@ -549,6 +549,9 @@ class CustomerSegmenter:
         onboarding_days = float(self.config.get("new_customer_days", 30))
 
         result["value_tier"] = np.where(clv >= high_value_threshold, "high_value", "low_value")
+        result["high_value"] = result["value_tier"].eq("high_value")
+        result["high_churn"] = churn >= high_churn_threshold
+        result["positive_uplift"] = uplift > 0
         result["uplift_class"] = np.where(
             uplift < 0,
             "sleeping_dog",
@@ -564,7 +567,7 @@ class CustomerSegmenter:
 
             if row["uplift_class"] == "sleeping_dog":
                 segments.append("sleeping_dog")
-            elif row["uplift_class"] == "persuadable":
+            elif row["uplift_class"] == "persuadable" and float(row[churn_col]) >= high_churn_threshold:
                 prefix = "high_value" if row["value_tier"] == "high_value" else "low_value"
                 segments.append(f"{prefix}_persuadable")
             elif float(row[churn_col]) >= high_churn_threshold:
@@ -576,9 +579,186 @@ class CustomerSegmenter:
 
         result["segment"] = segments
         cols = [customer_col, "segment", churn_col, uplift_col, clv_col, "priority_score"]
-        optional = [c for c in ["value_tier", "uplift_class", new_customer_col] if c in result.columns]
+        optional = [
+            c
+            for c in [
+                "value_tier",
+                "high_value",
+                "high_churn",
+                "positive_uplift",
+                "uplift_class",
+                new_customer_col,
+            ]
+            if c in result.columns
+        ]
         passthrough = [c for c in result.columns if c not in cols + optional and c in ("recency", "frequency", "monetary")]
-        return result[cols + optional + passthrough].copy()
+        output = result[cols + optional + passthrough].copy()
+        output.attrs["high_value_actionable_evidence"] = self.build_value_uplift_evidence(
+            output,
+            churn_col=churn_col,
+            uplift_col=uplift_col,
+            clv_col=clv_col,
+            customer_col=customer_col,
+            high_value_threshold=high_value_threshold,
+            high_churn_threshold=high_churn_threshold,
+            neutral_uplift_threshold=neutral_band,
+        )
+        return output
+
+    def build_value_uplift_evidence(
+        self,
+        segmented_data: pd.DataFrame,
+        churn_col: str = "churn_probability",
+        uplift_col: str = "uplift_score",
+        clv_col: str = "predicted_clv",
+        customer_col: str = "customer_id",
+        high_value_threshold: Optional[float] = None,
+        high_churn_threshold: Optional[float] = None,
+        neutral_uplift_threshold: Optional[float] = None,
+        sample_size: int = 20,
+    ) -> Dict[str, Any]:
+        """Summarize high-value actionable segment evidence.
+
+        The report passes validation when high-value persuadable or lost-cause
+        customers exist. If they do not, it carries an explicit absence report
+        with the calibration thresholds and population counts used.
+        """
+        required = {customer_col, "segment", churn_col, uplift_col, clv_col}
+        missing = sorted(required - set(segmented_data.columns))
+        if missing:
+            raise ValueError(f"Missing columns for segment evidence: {missing}")
+
+        frame = segmented_data.copy()
+        clv = frame[clv_col].astype(float)
+        churn = frame[churn_col].astype(float)
+        uplift = frame[uplift_col].astype(float)
+
+        if high_value_threshold is None:
+            high_value_threshold = float(
+                clv.quantile(self.config.get("high_value_quantile", 0.8))
+            )
+        if high_churn_threshold is None:
+            high_churn_threshold = float(self.config.get("high_churn_threshold", 0.5))
+        if neutral_uplift_threshold is None:
+            neutral_uplift_threshold = float(
+                self.config.get("neutral_uplift_threshold", 0.05)
+            )
+
+        high_value = (
+            frame["high_value"].astype(bool)
+            if "high_value" in frame.columns
+            else clv >= high_value_threshold
+        )
+        high_churn = (
+            frame["high_churn"].astype(bool)
+            if "high_churn" in frame.columns
+            else churn >= high_churn_threshold
+        )
+        positive_uplift = (
+            frame["positive_uplift"].astype(bool)
+            if "positive_uplift" in frame.columns
+            else uplift > 0
+        )
+
+        high_value_persuadable = frame["segment"].eq("high_value_persuadable")
+        high_value_lost_cause = frame["segment"].eq("high_value_lost_cause")
+        high_value_actionable = high_value_persuadable | high_value_lost_cause
+        high_value_at_risk_positive = high_value & high_churn & positive_uplift
+        high_value_at_risk_nonpositive = high_value & high_churn & ~positive_uplift
+
+        sample_cols = [
+            c
+            for c in [
+                customer_col,
+                "segment",
+                churn_col,
+                uplift_col,
+                clv_col,
+                "priority_score",
+            ]
+            if c in frame.columns
+        ]
+        sample = (
+            frame.loc[high_value_actionable, sample_cols]
+            .sort_values(
+                by="priority_score" if "priority_score" in sample_cols else clv_col,
+                ascending=False,
+            )
+            .head(sample_size)
+            .to_dict(orient="records")
+        )
+
+        report: Dict[str, Any] = {
+            "high_value_threshold": float(high_value_threshold),
+            "high_churn_threshold": float(high_churn_threshold),
+            "neutral_uplift_threshold": float(neutral_uplift_threshold),
+            "total_customers": int(len(frame)),
+            "high_value_count": int(high_value.sum()),
+            "high_risk_count": int(high_churn.sum()),
+            "positive_uplift_count": int(positive_uplift.sum()),
+            "high_value_persuadable_count": int(high_value_persuadable.sum()),
+            "high_value_lost_cause_count": int(high_value_lost_cause.sum()),
+            "high_value_actionable_count": int(high_value_actionable.sum()),
+            "high_value_at_risk_positive_uplift_count": int(
+                high_value_at_risk_positive.sum()
+            ),
+            "high_value_at_risk_nonpositive_uplift_count": int(
+                high_value_at_risk_nonpositive.sum()
+            ),
+            "actionable_samples": sample,
+            "absence_report": None,
+            "absence_reason": None,
+        }
+
+        if report["high_value_actionable_count"] == 0:
+            report["absence_report"] = {
+                "reason": (
+                    "No high-value customers met persuadable or lost-cause "
+                    "criteria under the configured churn/uplift/CLV thresholds."
+                ),
+                "thresholds": {
+                    "high_value_threshold": float(high_value_threshold),
+                    "high_churn_threshold": float(high_churn_threshold),
+                    "neutral_uplift_threshold": float(neutral_uplift_threshold),
+                },
+                "counts": {
+                    "total_customers": report["total_customers"],
+                    "high_value_count": report["high_value_count"],
+                    "high_risk_count": report["high_risk_count"],
+                    "positive_uplift_count": report["positive_uplift_count"],
+                    "high_value_at_risk_positive_uplift_count": report[
+                        "high_value_at_risk_positive_uplift_count"
+                    ],
+                    "high_value_at_risk_nonpositive_uplift_count": report[
+                        "high_value_at_risk_nonpositive_uplift_count"
+                    ],
+                },
+            }
+            report["absence_reason"] = report["absence_report"]["reason"]
+
+        return report
+
+    def validate_value_uplift_evidence(
+        self,
+        evidence: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate high-value actionable evidence or structured absence."""
+        has_actionable_segment = (
+            int(evidence.get("high_value_persuadable_count", 0)) > 0
+            or int(evidence.get("high_value_lost_cause_count", 0)) > 0
+        )
+        absence = evidence.get("absence_report")
+
+        if has_actionable_segment:
+            return {"valid": True, "reason": "high_value_actionable_evidence_present"}
+
+        if isinstance(absence, dict) and absence.get("reason") and absence.get("counts"):
+            return {"valid": True, "reason": "structured_absence_report_present"}
+
+        return {
+            "valid": False,
+            "reason": "missing_high_value_actionable_evidence_or_absence_report",
+        }
 
     # ------------------------------------------------------------------
     # Retention Actions

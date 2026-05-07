@@ -239,6 +239,368 @@ class TestDashboardDataLoaderInterface:
 
 
 class TestDashboardArtifactAdapters:
+    def test_required_loaders_do_not_use_sample_data_when_artifacts_missing(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir = tmp_path / "results"
+        artifacts_dir.mkdir()
+        results_dir.mkdir()
+
+        cfg = dict(config)
+        cfg["dashboard"] = {
+            "artifacts_dir": str(artifacts_dir),
+            "results_dir": str(results_dir),
+        }
+        loader = DashboardDataLoader(cfg)
+
+        predictions = loader.load_predictions()
+        budget = loader.load_budget_results()
+        recommendations = loader.load_recommendations()
+        uplift = loader.load_uplift_results()
+        clv = loader.load_clv_data()
+        metrics = loader.load_model_metrics()
+        ab_results = loader.load_ab_test_results()
+
+        assert predictions.empty
+        assert budget.empty
+        assert recommendations.empty
+        assert uplift.empty
+        assert clv.empty
+        assert metrics == {}
+        assert ab_results == {}
+        issues = loader.get_artifact_issues()
+        assert "churn_predictions" in issues
+        assert "budget_results" in issues
+        assert "recommendations" in issues
+        assert "uplift_results" in issues
+        assert "clv_data" in issues
+
+    def test_invalid_required_prediction_artifact_returns_visible_empty_state(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1"]}).to_csv(
+            results_dir / "churn_predictions.csv", index=False
+        )
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        predictions = loader.load_predictions()
+
+        assert predictions.empty
+        assert "dashboard_issue" in predictions.attrs
+        assert "missing columns: churn_probability" in loader.get_artifact_issue(
+            "churn_predictions"
+        )
+
+    def test_missing_monitoring_report_returns_visible_empty_state(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir.mkdir()
+        artifacts_dir.mkdir()
+
+        cfg = dict(config)
+        cfg["dashboard"] = {
+            "results_dir": str(results_dir),
+            "artifacts_dir": str(artifacts_dir),
+        }
+        loader = DashboardDataLoader(cfg)
+        drift = loader.load_drift_history()
+
+        assert drift.empty
+        assert drift.attrs["artifact_name"] == "monitoring_report"
+        issue = loader.get_artifact_issue("monitoring_report")
+        assert "monitoring_report.json" in issue
+        assert "cannot use generated samples" in issue
+
+    def test_invalid_clv_artifact_is_not_zero_filled_in_predictions(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "churn_probability": [0.2, 0.7],
+        }).to_csv(results_dir / "churn_predictions.csv", index=False)
+        pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "predicted_clv": [-1.0, None],
+        }).to_csv(results_dir / "clv_predictions.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        predictions = loader.load_predictions()
+
+        assert "clv_predicted" in predictions.columns
+        c1_clv = predictions.loc[
+            predictions["customer_id"] == "C1", "clv_predicted"
+        ].iloc[0]
+        c2_clv = predictions.loc[
+            predictions["customer_id"] == "C2", "clv_predicted"
+        ].iloc[0]
+        assert c1_clv == -1.0
+        assert pd.isna(c2_clv)
+        issue = loader.get_artifact_issue("clv_data")
+        assert "negative CLV rows" in issue
+        assert "null/non-numeric CLV rows" in issue
+
+    def test_zero_clv_rows_are_preserved_without_loader_issue(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3", "C4"]}).to_csv(
+            results_dir / "customers.csv", index=False
+        )
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3", "C4"],
+            "predicted_clv": [1200.0, 0.0, 0.0, 300.0],
+        }).to_csv(results_dir / "clv_predictions.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        clv = loader.load_clv_data()
+
+        assert clv["customer_id"].tolist() == ["C1", "C2", "C3", "C4"]
+        assert clv["clv_predicted"].tolist() == [1200.0, 0.0, 0.0, 300.0]
+        assert loader.get_artifact_issue("clv_data") is None
+
+    def test_invalid_clv_artifact_records_visible_coverage_issue(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3", "C4"],
+            "predicted_clv": [1200.0, 0.0, -5.0, None],
+        }).to_csv(results_dir / "clv_predictions.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        clv = loader.load_clv_data()
+
+        assert clv["customer_id"].tolist() == ["C1", "C2", "C3", "C4"]
+        issue = loader.get_artifact_issue("clv_data")
+        assert "invalid coverage" in issue
+        assert "1 negative CLV rows" in issue
+        assert "1 null/non-numeric CLV rows" in issue
+
+    def test_clv_checklist_validation_allows_zero_values(
+        self, tmp_path
+    ):
+        from src.main import _validate_required_artifact
+
+        results_dir = tmp_path / "results"
+        data_dir = tmp_path / "data"
+        results_dir.mkdir()
+        data_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3"]}).to_csv(
+            data_dir / "customers.csv", index=False
+        )
+        path = results_dir / "clv_predictions.csv"
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3"],
+            "predicted_clv": [100.0, 0.0, 200.0],
+        }).to_csv(path, index=False)
+
+        validation = _validate_required_artifact(
+            "clv_predictions.csv",
+            path,
+            data_dir=data_dir,
+        )
+
+        assert validation["valid"] is True
+
+    def test_clv_checklist_validation_rejects_negative_values(
+        self, tmp_path
+    ):
+        from src.main import _validate_required_artifact
+
+        results_dir = tmp_path / "results"
+        data_dir = tmp_path / "data"
+        results_dir.mkdir()
+        data_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3"]}).to_csv(
+            data_dir / "customers.csv", index=False
+        )
+        path = results_dir / "clv_predictions.csv"
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3"],
+            "predicted_clv": [100.0, 0.0, -1.0],
+        }).to_csv(path, index=False)
+
+        validation = _validate_required_artifact(
+            "clv_predictions.csv",
+            path,
+            data_dir=data_dir,
+        )
+
+        assert validation["valid"] is False
+        assert validation["reason"] == "negative_clv_values"
+        assert validation["invalid_rows"] == 1
+
+    def test_clv_checklist_validation_rejects_null_values(
+        self, tmp_path
+    ):
+        from src.main import _validate_required_artifact
+
+        results_dir = tmp_path / "results"
+        data_dir = tmp_path / "data"
+        results_dir.mkdir()
+        data_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3"]}).to_csv(
+            data_dir / "customers.csv", index=False
+        )
+        path = results_dir / "clv_predictions.csv"
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3"],
+            "predicted_clv": [100.0, None, 0.0],
+        }).to_csv(path, index=False)
+
+        validation = _validate_required_artifact(
+            "clv_predictions.csv",
+            path,
+            data_dir=data_dir,
+        )
+
+        assert validation["valid"] is False
+        assert validation["reason"] == "null_or_non_numeric_clv_values"
+        assert validation["invalid_rows"] == 1
+
+    def test_clv_checklist_validation_rejects_duplicate_customers(
+        self, tmp_path
+    ):
+        from src.main import _validate_required_artifact
+
+        results_dir = tmp_path / "results"
+        data_dir = tmp_path / "data"
+        results_dir.mkdir()
+        data_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3"]}).to_csv(
+            data_dir / "customers.csv", index=False
+        )
+        path = results_dir / "clv_predictions.csv"
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C2", "C3"],
+            "predicted_clv": [100.0, 0.0, 200.0, 300.0],
+        }).to_csv(path, index=False)
+
+        validation = _validate_required_artifact(
+            "clv_predictions.csv",
+            path,
+            data_dir=data_dir,
+        )
+
+        assert validation["valid"] is False
+        assert validation["reason"] == "duplicate_clv_predictions"
+
+    def test_clv_checklist_validation_rejects_partial_customer_coverage(
+        self, tmp_path
+    ):
+        from src.main import _validate_required_artifact
+
+        results_dir = tmp_path / "results"
+        data_dir = tmp_path / "data"
+        results_dir.mkdir()
+        data_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3"]}).to_csv(
+            data_dir / "customers.csv", index=False
+        )
+        path = results_dir / "clv_predictions.csv"
+        pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "predicted_clv": [100.0, 200.0],
+        }).to_csv(path, index=False)
+
+        validation = _validate_required_artifact(
+            "clv_predictions.csv",
+            path,
+            data_dir=data_dir,
+        )
+
+        assert validation["valid"] is False
+        assert validation["reason"] == "not_all_customers_covered_by_clv"
+        assert validation["missing_customers"] == 1
+
+    def test_prediction_coverage_reports_full_and_partial_customers(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        pd.DataFrame({"customer_id": ["C1", "C2", "C3"]}).to_csv(
+            results_dir / "customers.csv", index=False
+        )
+        pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3"],
+            "churn_probability": [0.1, 0.2, 0.3],
+        }).to_csv(results_dir / "churn_predictions.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        assert len(loader.load_predictions()) == 3
+        full = loader.get_prediction_coverage()
+        assert full["is_full_coverage"] is True
+        assert full["coverage_ratio"] == 1.0
+
+        pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "churn_probability": [0.1, 0.2],
+        }).to_csv(results_dir / "churn_predictions.csv", index=False)
+        partial_loader = DashboardDataLoader(cfg)
+        assert len(partial_loader.load_predictions()) == 2
+        partial = partial_loader.get_prediction_coverage()
+        assert partial["is_full_coverage"] is False
+        assert partial["covered_count"] == 2
+        assert partial["missing_count"] == 1
+
+    def test_model_performance_history_adapter_reads_real_history(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        pd.DataFrame({
+            "timestamp": ["2026-05-07T00:00:00Z"],
+            "model": ["ensemble"],
+            "auc_roc": [0.91],
+            "precision": [0.82],
+            "recall": [0.73],
+            "f1": [0.77],
+        }).to_csv(results_dir / "model_performance_history.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        history = loader.load_model_performance_history()
+
+        assert history.loc[0, "model_type"] == "ensemble"
+        assert history.loc[0, "auc"] == 0.91
+        assert history.loc[0, "f1_score"] == 0.77
+
     def test_load_budget_results_reads_results_dir(self, tmp_path, config):
         from src.dashboard.data_loader import DashboardDataLoader
 

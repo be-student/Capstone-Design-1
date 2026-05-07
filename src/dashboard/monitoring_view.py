@@ -48,7 +48,7 @@ def render_model_monitoring(st_module, config: Dict, data_loader=None):
     scoring_throughput = data_loader.load_scoring_throughput()
     survival_curves = data_loader.load_survival_curves()
     survival_data = data_loader.load_survival_data()
-    mlflow_runs = data_loader.load_mlflow_runs()
+    performance_history = _load_performance_history(data_loader)
 
     # =================================================================
     # Section 1: Drift Detection Overview
@@ -66,7 +66,7 @@ def render_model_monitoring(st_module, config: Dict, data_loader=None):
     st.markdown("---")
     st.subheader("Model Performance Metrics Over Time")
 
-    _render_performance_section(st, model_metrics, mlflow_runs)
+    _render_performance_section(st, model_metrics, performance_history)
 
     # =================================================================
     # Section 3: Scoring Throughput & Latency
@@ -207,10 +207,49 @@ def _render_drift_section(st, config: Dict, drift_history: pd.DataFrame):
     )
 
 
+def _load_performance_history(data_loader) -> pd.DataFrame:
+    """Load model performance history through explicit dashboard loaders."""
+    if hasattr(data_loader, "load_model_performance_history"):
+        history = data_loader.load_model_performance_history()
+        if not history.empty:
+            return history
+
+    metric_frames = []
+    for loader_name in [
+        "load_auc_history",
+        "load_precision_history",
+        "load_recall_history",
+    ]:
+        if hasattr(data_loader, loader_name):
+            metric_frames.append(getattr(data_loader, loader_name)())
+    metric_frames = [df for df in metric_frames if isinstance(df, pd.DataFrame) and not df.empty]
+    if not metric_frames:
+        return pd.DataFrame()
+
+    merged = metric_frames[0]
+    keys = [c for c in ["timestamp", "model_type"] if c in merged.columns]
+    for frame in metric_frames[1:]:
+        frame_keys = [c for c in ["timestamp", "model_type"] if c in frame.columns]
+        join_keys = [c for c in keys if c in frame_keys]
+        if join_keys:
+            merged = merged.merge(frame, on=join_keys, how="outer")
+        else:
+            merged = pd.concat([merged, frame], ignore_index=True, sort=False)
+    if "run_id" not in merged.columns:
+        merged["run_id"] = [f"history_{i}" for i in range(len(merged))]
+    if "training_time_s" not in merged.columns:
+        merged["training_time_s"] = 1.0
+    return merged
+
+
 def _render_performance_section(
     st, model_metrics: Dict, mlflow_runs: pd.DataFrame,
 ):
     """Render model performance metrics section."""
+    if not model_metrics and mlflow_runs.empty:
+        st.warning("No model performance metrics available.")
+        return
+
     if model_metrics:
         st.markdown("#### Current Model Performance")
         metric_names = [

@@ -403,6 +403,25 @@ class TestRenderCLV:
         render_clv(st_mock, config, loader_mock)
         st_mock.warning.assert_called()
 
+    def test_render_clv_surfaces_partial_clv_loader_issue(
+        self, config, sample_predictions, st_mock
+    ):
+        """render_clv must show loader warnings when CLV coverage is partial."""
+        from src.dashboard.app import render_clv
+
+        issue = "CLV artifact has invalid coverage: 1 negative CLV rows."
+        loader_mock = MagicMock()
+        loader_mock.load_predictions.return_value = sample_predictions
+        loader_mock.load_clv_data.return_value = sample_predictions[
+            ["customer_id", "clv_predicted", "segment"]
+        ]
+        loader_mock.get_artifact_issue.return_value = issue
+
+        render_clv(st_mock, config, loader_mock)
+
+        warning_messages = [call.args[0] for call in st_mock.warning.call_args_list]
+        assert issue in warning_messages
+
     def test_render_clv_kpi_metrics(self, config, sample_predictions, st_mock):
         """render_clv must display KPI metrics (Total CLV, Avg, Median, Std)."""
         from src.dashboard.app import render_clv

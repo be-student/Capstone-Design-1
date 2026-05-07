@@ -207,6 +207,40 @@ class TestRenderFunctionsSmokeTest:
         except Exception as e:
             assert not isinstance(e, (ImportError, AttributeError)), str(e)
 
+    def test_render_model_performance_empty_metrics_warns(
+        self, mock_st, config
+    ):
+        """Missing model metrics should render an empty state, not crash."""
+        from src.dashboard.app import render_model_performance
+
+        loader = MagicMock()
+        loader.load_model_metrics.return_value = {}
+        loader.get_artifact_issue.return_value = "Required model_metrics.json missing."
+
+        render_model_performance(mock_st, config, loader)
+
+        mock_st.warning.assert_called_once()
+        loader.load_roc_data.assert_not_called()
+
+    def test_render_clv_empty_loader_issue_warns(self, mock_st, config):
+        """Missing CLV evidence should stop dependent CLV rendering visibly."""
+        from src.dashboard.app import render_clv
+
+        loader = MagicMock()
+        loader.load_predictions.return_value = pd.DataFrame({
+            "customer_id": ["C1"],
+            "churn_probability": [0.5],
+        })
+        loader.load_clv_data.return_value = pd.DataFrame(
+            columns=["customer_id", "clv_predicted", "segment"]
+        )
+        loader.get_artifact_issue.return_value = "Required CLV artifact missing."
+
+        render_clv(mock_st, config, loader)
+
+        mock_st.warning.assert_called_once()
+        mock_st.plotly_chart.assert_not_called()
+
     def test_render_uplift_runs(self, mock_st, config, data_loader):
         """render_uplift should run without raising exceptions."""
         from src.dashboard.app import render_uplift
@@ -391,9 +425,12 @@ class TestDashboardDataQuality:
         assert df["uplift_score"].std() > 0
 
     def test_clv_predictions_positive(self, data_loader):
-        """CLV predictions must be positive."""
+        """CLV predictions must be numeric, non-negative, and complete."""
         df = data_loader.load_clv_data()
-        assert (df["clv_predicted"] > 0).all()
+        assert len(df) == 20000
+        assert pd.api.types.is_numeric_dtype(df["clv_predicted"])
+        assert df["clv_predicted"].notna().all()
+        assert (df["clv_predicted"] >= 0).all()
 
     def test_cohort_data_has_revenue(self, data_loader):
         """Cohort data must include revenue column."""

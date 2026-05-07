@@ -444,22 +444,27 @@ class TestDLTrainerEvaluation:
 class TestDLTrainerMLflowIntegration:
     """Test MLflow integration in the trainer."""
 
-    def test_train_with_mlflow_tracker(self, small_config, sample_data, tmp_path):
+    def test_train_with_mlflow_tracker(
+        self, small_config, sample_data, tmp_path, monkeypatch
+    ):
         """Training must integrate with MLflowTracker."""
         from src.models.dl_trainer import DLTrainer
         from src.models.mlflow_tracking import MLflowTracker
 
         X_train, X_test, y_train, y_test = sample_data
         small_config["dl_model"]["epochs"] = 3
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
 
         # Setup MLflow with temp dir
+        tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
         small_config["mlflow"] = {
-            "tracking_uri": f"sqlite:///{tmp_path / 'mlflow.db'}",
+            "tracking_uri": tracking_uri,
             "artifact_location": str(tmp_path / "artifacts"),
             "experiment_name": "dl_trainer_test",
         }
 
         tracker = MLflowTracker(small_config)
+        assert tracker.tracking_uri == tracking_uri
         tracker.create_experiment(name="dl_trainer_test")
         tracker.start_run(run_name="dl_test_run")
 
@@ -474,7 +479,7 @@ class TestDLTrainerMLflowIntegration:
         assert result["evaluation"]["auc"] > 0.0
 
     def test_architecture_selection_with_mlflow(
-        self, small_config, sample_data, tmp_path
+        self, small_config, sample_data, tmp_path, monkeypatch
     ):
         """Architecture selection must log comparison to MLflow."""
         from src.models.dl_trainer import DLTrainer
@@ -482,14 +487,17 @@ class TestDLTrainerMLflowIntegration:
 
         X_train, _, y_train, _ = sample_data
         small_config["dl_model"]["epochs"] = 2
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
 
+        tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
         small_config["mlflow"] = {
-            "tracking_uri": f"sqlite:///{tmp_path / 'mlflow.db'}",
+            "tracking_uri": tracking_uri,
             "artifact_location": str(tmp_path / "artifacts"),
             "experiment_name": "arch_selection_test",
         }
 
         tracker = MLflowTracker(small_config)
+        assert tracker.tracking_uri == tracking_uri
         tracker.create_experiment(name="arch_selection_test")
         tracker.start_run(run_name="arch_select_run")
 

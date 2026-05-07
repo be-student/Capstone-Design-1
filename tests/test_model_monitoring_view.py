@@ -201,6 +201,41 @@ class TestRenderModelMonitoring:
         render_model_monitoring(mock_st, config, data_loader)
         assert mock_st.plotly_chart.call_count >= 3
 
+    def test_uses_model_performance_history_loader(self, mock_st, config):
+        """Monitoring page should use real performance history, not only MLflow fallback."""
+        from src.dashboard.monitoring_view import render_model_monitoring
+
+        loader = MagicMock()
+        loader.load_drift_history.return_value = pd.DataFrame()
+        loader.load_model_metrics.return_value = {
+            "ensemble": {
+                "auc": 0.91,
+                "precision": 0.82,
+                "recall": 0.73,
+                "f1_score": 0.77,
+                "accuracy": 0.88,
+            }
+        }
+        loader.load_scoring_throughput.return_value = pd.DataFrame()
+        loader.load_survival_curves.return_value = {}
+        loader.load_survival_data.return_value = pd.DataFrame()
+        loader.load_model_performance_history.return_value = pd.DataFrame({
+            "timestamp": ["2026-05-07T00:00:00Z"],
+            "run_id": ["history_0"],
+            "model_type": ["ensemble"],
+            "auc": [0.91],
+            "precision": [0.82],
+            "recall": [0.73],
+            "f1_score": [0.77],
+            "accuracy": [0.88],
+            "training_time_s": [1.0],
+        })
+
+        render_model_monitoring(mock_st, config, loader)
+
+        loader.load_model_performance_history.assert_called_once()
+        assert not loader.load_mlflow_runs.called
+
 
 # ---------------------------------------------------------------------------
 # Test: Drift Detection Section

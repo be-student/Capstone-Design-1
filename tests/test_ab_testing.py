@@ -17,7 +17,8 @@ Tests cover:
 - Configurable parameters from YAML
 """
 
-import os
+import argparse
+import json
 import sys
 import pytest
 import numpy as np
@@ -326,6 +327,106 @@ class TestDashboardAdapters:
         detailed = ab_test_framework.to_dashboard_detailed_results(payload)
         assert detailed["summary"]["total_experiments"] == 2
         assert len(detailed["experiments"]) == 2
+
+    def test_detailed_rows_include_power_sample_size_schema(self, ab_test_framework):
+        raw = {
+            "name": "coupon",
+            "treatment_size": 500,
+            "control_size": 500,
+            "treatment_mean": 0.12,
+            "control_mean": 0.20,
+            "p_value": 0.01,
+            "is_significant": True,
+            "confidence_interval": [-0.12, -0.04],
+            "power_analysis": {
+                "required_sample_size": 450,
+                "required_total_sample_size": 900,
+                "target_power": 0.80,
+            },
+            "power": 0.83,
+        }
+        converted = ab_test_framework.to_dashboard_experiment(raw)
+        for key in [
+            "required_sample_size_per_group",
+            "required_total_sample_size",
+            "observed_power",
+            "design_power",
+            "is_underpowered",
+            "power_status",
+        ]:
+            assert key in converted
+        assert converted["required_sample_size_per_group"] == 450
+        assert converted["required_total_sample_size"] == 900
+        assert converted["observed_power"] == pytest.approx(0.83)
+        assert converted["design_power"] == pytest.approx(0.80)
+        assert converted["is_underpowered"] is False
+        assert converted["power_status"] == "adequately_powered"
+
+    def test_underpowered_experiment_is_explicit_not_passing(self, ab_test_framework):
+        raw = {
+            "name": "small_coupon",
+            "treatment_size": 100,
+            "control_size": 100,
+            "treatment_mean": 0.12,
+            "control_mean": 0.20,
+            "p_value": 0.01,
+            "is_significant": True,
+            "confidence_interval": [-0.14, -0.02],
+            "power_analysis": {
+                "required_sample_size": 500,
+                "required_total_sample_size": 1000,
+                "target_power": 0.80,
+            },
+            "power": 0.42,
+        }
+        converted = ab_test_framework.to_dashboard_experiment(raw)
+        assert converted["statistically_significant"] is True
+        assert converted["is_underpowered"] is True
+        assert converted["power_status"] == "underpowered"
+        assert converted["is_significant"] is False
+
+    def test_run_ab_test_persists_detailed_power_schema(self, tmp_path, config):
+        from src import main
+
+        data_dir = tmp_path / "data" / "raw"
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        data_dir.mkdir(parents=True)
+
+        n = 120
+        groups = np.array(["treatment"] * (n // 2) + ["control"] * (n // 2))
+        churn = np.array([0] * 48 + [1] * 12 + [0] * 42 + [1] * 18)
+        customers = pd.DataFrame({
+            "customer_id": [f"C{i:04d}" for i in range(n)],
+            "signup_date": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "persona": ["regular_loyal"] * n,
+            "treatment_group": groups,
+            "churn_label": churn,
+        })
+        customers.to_csv(data_dir / "customers.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"artifacts_dir": str(artifacts_dir)}
+        args = argparse.Namespace(data=str(data_dir), output=str(tmp_path))
+
+        main.run_ab_test(cfg, args)
+
+        detailed = json.loads((results_dir / "ab_test_detailed.json").read_text())
+        assert detailed["experiments"]
+        experiment = detailed["experiments"][0]
+        for key in [
+            "required_sample_size_per_group",
+            "required_total_sample_size",
+            "observed_power",
+            "design_power",
+            "is_underpowered",
+            "power_status",
+            "statistically_significant",
+        ]:
+            assert key in experiment
+        assert experiment["power_status"] in {"underpowered", "adequately_powered"}
+        assert isinstance(experiment["statistically_significant"], bool)
+        assert (artifacts_dir / "ab_test_detailed.json").exists()
 
     def test_significance_with_binary_metric(self, ab_test_framework,
                                                sample_experiment_data):

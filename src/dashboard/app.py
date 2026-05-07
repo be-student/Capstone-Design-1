@@ -86,6 +86,28 @@ def get_data_loader(config: Dict[str, Any]):
     return DashboardDataLoader(config)
 
 
+def _show_loader_issue(st, data_loader, artifact_name: str, fallback: str) -> None:
+    """Render a dashboard-visible loader issue when strict artifacts fail."""
+    issue = (
+        data_loader.get_artifact_issue(artifact_name)
+        if hasattr(data_loader, "get_artifact_issue")
+        else None
+    )
+    st.warning(issue or fallback)
+
+
+def _show_prediction_coverage(st, data_loader) -> None:
+    """Render full-customer churn prediction coverage evidence."""
+    if not hasattr(data_loader, "get_prediction_coverage"):
+        return
+    coverage = data_loader.get_prediction_coverage()
+    message = coverage.get("message", "")
+    if coverage.get("is_full_coverage"):
+        st.success(message)
+    else:
+        st.warning(message)
+
+
 # =========================================================================
 # Page render functions
 # =========================================================================
@@ -111,8 +133,15 @@ def render_overview(st_module, config: Dict, data_loader=None):
     predictions = data_loader.load_predictions()
 
     if predictions.empty:
-        st.warning("No prediction data available.")
+        _show_loader_issue(
+            st,
+            data_loader,
+            "churn_predictions",
+            "No prediction data available.",
+        )
         return
+
+    _show_prediction_coverage(st, data_loader)
 
     # KPI cards
     col1, col2, col3, col4 = st.columns(4)
@@ -289,6 +318,14 @@ def render_model_performance(st_module, config: Dict, data_loader=None):
         data_loader = get_data_loader(config)
 
     metrics = data_loader.load_model_metrics()
+    if not metrics:
+        _show_loader_issue(
+            st,
+            data_loader,
+            "model_metrics",
+            "No model performance metrics available.",
+        )
+        return
 
     # -----------------------------------------------------------------
     # KPI summary cards
@@ -1940,9 +1977,39 @@ def render_clv(st_module, config: Dict, data_loader=None):
     predictions = data_loader.load_predictions()
     clv_data = data_loader.load_clv_data()
 
-    if predictions.empty or "clv_predicted" not in predictions.columns:
-        st.warning("No CLV data available.")
+    if clv_data.empty:
+        _show_loader_issue(
+            st,
+            data_loader,
+            "clv_data",
+            "No CLV data available.",
+        )
         return
+    if hasattr(data_loader, "get_artifact_issue") and data_loader.get_artifact_issue(
+        "clv_data"
+    ):
+        _show_loader_issue(
+            st,
+            data_loader,
+            "clv_data",
+            "CLV data has partial coverage.",
+        )
+    if not predictions.empty:
+        prediction_cols = [
+            c for c in ["customer_id", "churn_probability", "risk_level"]
+            if c in predictions.columns
+        ]
+        predictions = clv_data.merge(
+            predictions[prediction_cols],
+            on="customer_id",
+            how="left",
+        )
+    else:
+        predictions = clv_data.copy()
+    if "churn_probability" not in predictions.columns:
+        predictions["churn_probability"] = np.nan
+    if "risk_level" not in predictions.columns:
+        predictions["risk_level"] = "unknown"
 
     currency = config.get("budget", {}).get("currency", "KRW")
 
@@ -2387,6 +2454,32 @@ def render_retention_campaign(st_module, config: Dict, data_loader=None):
     currency = config.get("budget", {}).get("currency", "KRW")
     default_budget = config.get("budget", {}).get("total_krw", 50_000_000)
 
+    if clv_data.empty:
+        _show_loader_issue(
+            st,
+            data_loader,
+            "clv_data",
+            "No CLV prediction data available.",
+        )
+        return
+    if hasattr(data_loader, "get_artifact_issue") and data_loader.get_artifact_issue(
+        "clv_data"
+    ):
+        _show_loader_issue(
+            st,
+            data_loader,
+            "clv_data",
+            "CLV prediction data has partial coverage.",
+        )
+    if not predictions.empty and "customer_id" in predictions.columns:
+        predictions = predictions.drop(
+            columns=[c for c in ["clv_predicted"] if c in predictions.columns],
+        ).merge(
+            clv_data[["customer_id", "clv_predicted"]],
+            on="customer_id",
+            how="left",
+        )
+
     # =================================================================
     # Section 1: CLV Distribution Summary
     # =================================================================
@@ -2812,8 +2905,15 @@ def render_churn_analytics(st_module, config: Dict, data_loader=None):
     model_metrics = data_loader.load_model_metrics()
 
     if predictions.empty:
-        st.warning("No prediction data available.")
+        _show_loader_issue(
+            st,
+            data_loader,
+            "churn_predictions",
+            "No prediction data available.",
+        )
         return
+
+    _show_prediction_coverage(st, data_loader)
 
     # -----------------------------------------------------------------
     # KPI Summary Row

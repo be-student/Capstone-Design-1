@@ -300,35 +300,18 @@ class PipelineRunner:
                 result = self.run_step(step_name, args)
                 all_results[step_name] = result
                 logger.info("[OK] %s", step_name)
-            except (RuntimeError, Exception) as exc:
+            except Exception as exc:
                 logger.error("[FAIL] %s: %s", step_name, exc)
-                import traceback
-                traceback.print_exc()
                 all_results[step_name] = {
                     "status": "failed",
                     "error": str(exc),
                 }
-                # Continue to next steps instead of crashing
-                logger.warning(
-                    "Continuing pipeline despite failure in '%s'",
-                    step_name,
-                )
+                raise
 
-        failed_steps = [k for k, v in all_results.items()
-                        if isinstance(v, dict) and v.get("status") == "failed"]
-        if failed_steps:
-            all_results["status"] = "completed_with_errors"
-            logger.warning("=" * 60)
-            logger.warning(
-                "Pipeline completed with %d failed step(s): %s",
-                len(failed_steps), ", ".join(failed_steps),
-            )
-            logger.warning("=" * 60)
-        else:
-            all_results["status"] = "completed"
-            logger.info("=" * 60)
-            logger.info("Full pipeline completed!")
-            logger.info("=" * 60)
+        all_results["status"] = "completed"
+        logger.info("=" * 60)
+        logger.info("Full pipeline completed!")
+        logger.info("=" * 60)
         return all_results
 
     def register_step(

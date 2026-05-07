@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.pipeline.artifact_validation import validate_cohort_artifacts
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "simulator_config.yaml"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 DEFAULT_RESULTS_DIR = PROJECT_ROOT / "results"
@@ -251,8 +253,6 @@ def _write_artifact_checklist(
         results_path = results_dir / name
         artifact_path = artifact_dir / name
         validation = _validate_required_artifact(name, results_path, data_dir=data_dir)
-        if results_path.exists():
-            _publish_artifact(config, results_path)
         results_hash = _file_sha256(results_path)
         artifact_hash = _file_sha256(artifact_path)
         mirror_valid = (
@@ -327,6 +327,59 @@ def _validate_required_artifact(
                         }
                 if df["customer_id"].astype(str).duplicated().any():
                     return {"valid": False, "reason": "duplicate_customer_predictions"}
+            if name == "clv_predictions.csv":
+                clv_col = None
+                for candidate in ("predicted_clv", "clv_predicted"):
+                    if candidate in df.columns:
+                        clv_col = candidate
+                        break
+                required = {"customer_id"}
+                missing = required - set(df.columns)
+                if clv_col is None:
+                    missing.add("predicted_clv")
+                if missing:
+                    return {
+                        "valid": False,
+                        "reason": "missing_clv_prediction_columns",
+                        "missing_columns": sorted(missing),
+                    }
+                if df["customer_id"].astype(str).duplicated().any():
+                    return {"valid": False, "reason": "duplicate_clv_predictions"}
+                customers_dir = data_dir or DEFAULT_DATA_DIR
+                customers_path = customers_dir / "customers.csv"
+                if customers_path.exists():
+                    expected_ids = pd.read_csv(
+                        customers_path,
+                        usecols=["customer_id"],
+                    )["customer_id"].astype(str)
+                    actual_ids = df["customer_id"].astype(str)
+                    expected_count = int(expected_ids.nunique())
+                    actual_count = int(actual_ids.nunique())
+                    missing_count = int(len(set(expected_ids) - set(actual_ids)))
+                    if actual_count != expected_count or missing_count:
+                        return {
+                            "valid": False,
+                            "reason": "not_all_customers_covered_by_clv",
+                            "expected_rows": expected_count,
+                            "actual_rows": actual_count,
+                            "missing_customers": missing_count,
+                        }
+                clv_values = pd.to_numeric(df[clv_col], errors="coerce")
+                null_count = int(clv_values.isna().sum())
+                if null_count:
+                    return {
+                        "valid": False,
+                        "reason": "null_or_non_numeric_clv_values",
+                        "invalid_rows": null_count,
+                    }
+                negative_count = int((clv_values < 0).sum())
+                if negative_count:
+                    return {
+                        "valid": False,
+                        "reason": "negative_clv_values",
+                        "invalid_rows": negative_count,
+                        "total_rows": int(len(df)),
+                    }
             if name == "cohort_retention_matrix.csv" and df.shape[1] < 3:
                 return {"valid": False, "reason": "needs_multiple_periods"}
             if name == "cohort_milestones.csv":
@@ -340,6 +393,19 @@ def _validate_required_artifact(
                     }
                 if df[list(required)].isna().all().any():
                     return {"valid": False, "reason": "all_null_milestone"}
+                analysis_path = path.parent / "cohort_analysis.json"
+                if analysis_path.exists():
+                    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+                    exact = {int(value) for value in analysis.get("exact_milestones", []) or []}
+                    missing_exact = [period for period in (1, 3, 6, 12) if period not in exact]
+                    if missing_exact:
+                        return {
+                            "valid": False,
+                            "reason": "missing_exact_retention_milestones",
+                            "missing_milestones": [
+                                f"M{period}" for period in missing_exact
+                            ],
+                        }
             if name == "recommendations.csv":
                 required = {
                     "customer_id", "recommendation_type", "segment",
@@ -400,6 +466,16 @@ def _validate_required_artifact(
             if name == "churn_last30_sequences.json" and len(payload) < 5:
                 return {"valid": False, "reason": "needs_top5_sequences"}
             if name == "cohort_analysis.json":
+                cohort_validation = validate_cohort_artifacts(
+                    path.parent,
+                    data_dir=data_dir,
+                )
+                if not cohort_validation["valid"]:
+                    return {
+                        "valid": False,
+                        "reason": "invalid_cohort_artifacts",
+                        "errors": cohort_validation["errors"],
+                    }
                 errors = payload.get("errors", [])
                 error_keys = [key for key in payload if key.endswith("_error")]
                 if payload.get("status") == "failed" or errors or error_keys:
@@ -410,6 +486,14 @@ def _validate_required_artifact(
                     }
                 if payload.get("retention_matrix_shape", [0, 0])[1] < 2:
                     return {"valid": False, "reason": "retention_has_one_period"}
+                exact = {int(value) for value in payload.get("exact_milestones", []) or []}
+                missing_exact = [period for period in (1, 3, 6, 12) if period not in exact]
+                if missing_exact:
+                    return {
+                        "valid": False,
+                        "reason": "missing_exact_retention_milestones",
+                        "missing_milestones": [f"M{period}" for period in missing_exact],
+                    }
                 required_flags = [
                     "churn_sequences_saved",
                     "pre_churn_events_saved",
@@ -435,6 +519,8 @@ def _validate_required_artifact(
                     "observed_power",
                     "design_power",
                     "is_underpowered",
+                    "power_status",
+                    "statistically_significant",
                 }
                 for exp in experiments:
                     missing = required - set(exp)
@@ -445,12 +531,18 @@ def _validate_required_artifact(
                             "missing_columns": sorted(missing),
                         }
             if name == "segment_validation.json":
-                if not (
+                has_actionable = (
                     payload.get("high_value_persuadable_count", 0) > 0
                     or payload.get("high_value_lost_cause_count", 0) > 0
-                    or payload.get("high_value_sure_thing_count", 0) > 0
-                    or payload.get("absence_reason")
-                ):
+                )
+                absence_report = payload.get("absence_report")
+                has_structured_absence = (
+                    isinstance(absence_report, dict)
+                    and bool(absence_report.get("reason"))
+                    and bool(absence_report.get("counts"))
+                    and bool(payload.get("absence_reason"))
+                )
+                if not (has_actionable or has_structured_absence):
                     return {"valid": False, "reason": "missing_high_value_segment_evidence"}
             if name == "monitoring_report.json":
                 psi = payload.get("psi_report", {})
@@ -1803,6 +1895,15 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
 
         milestone_df = analyzer.extract_retention_milestones(retention).reset_index()
         required_milestones = ["M1", "M3", "M6", "M12"]
+        retention_periods = {
+            int(col) for col in retention.columns
+            if isinstance(col, (int, np.integer))
+            or (isinstance(col, str) and col.isdigit())
+        }
+        exact_milestones = [period for period in (1, 3, 6, 12) if period in retention_periods]
+        fallback_milestones = [
+            f"M{period}" for period in (1, 3, 6, 12) if period not in retention_periods
+        ]
         missing_milestones = [col for col in required_milestones if col not in milestone_df.columns]
         null_milestones = [
             col for col in required_milestones
@@ -1815,13 +1916,13 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
             )
         _save_result_and_artifact(milestone_df, results_dir / "cohort_milestones.csv", config)
         out["available_milestones"] = [1, 3, 6, 12]
-        out["exact_milestones"] = [
-            int(col) for col in [1, 3, 6, 12] if col in retention.columns
-        ]
+        out["exact_milestones"] = exact_milestones
+        out["fallback_milestones"] = fallback_milestones
         out["milestone_columns"] = ["M0", "M1", "M3", "M6", "M12"]
         out["milestone_fallback_policy"] = (
             "When exact M6/M12 is beyond the observation window, the latest "
-            "observed retention period is carried forward."
+            "observed retention period is carried forward for exploratory "
+            "display only; submission validation requires exact milestones."
         )
 
         churn_rates = analyzer.compute_churn_rates(retention)
@@ -1829,13 +1930,25 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
 
     try:
         seq = extract_churn_sequences(events, customers, top_n=5)
+        sequence_observations = 0
+        for item in seq:
+            try:
+                sequence_observations += int(item[1])
+            except (IndexError, TypeError, ValueError):
+                continue
         if len(seq) < 5:
             errors.append("churn_sequences_requires_top5_patterns")
+        if len(customers) >= 20_000 and sequence_observations < 6:
+            errors.append(
+                "churn_sequences_observations_too_small: "
+                f"{sequence_observations}"
+            )
         if isinstance(seq, pd.DataFrame):
             _save_result_and_artifact(seq, results_dir / "churn_last30_sequences.csv", config)
         else:
             _save_result_and_artifact(seq, results_dir / "churn_last30_sequences.json", config)
         out["churn_sequences_saved"] = True
+        out["churn_sequence_observations"] = int(sequence_observations)
     except Exception as exc:
         logger.warning("Churn sequence extraction failed: %s", exc)
         out["churn_sequences_error"] = str(exc)
@@ -1862,6 +1975,15 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
         if isinstance(funnel, pd.DataFrame):
             if funnel.empty or funnel.shape[0] < 5:
                 errors.append("journey_funnel_requires_five_stages")
+            signup = funnel.loc[funnel["stage"] == "Signup", "count"]
+            expected_customers = int(customers["customer_id"].nunique())
+            if signup.empty:
+                errors.append("journey_funnel_missing_signup_stage")
+            elif int(signup.iloc[0]) != expected_customers:
+                errors.append(
+                    "journey_signup_count_mismatch: "
+                    f"{int(signup.iloc[0])}_expected_{expected_customers}"
+                )
             _save_result_and_artifact(funnel, results_dir / "journey_funnel.csv", config)
         else:
             _save_result_and_artifact(funnel, results_dir / "journey_funnel.json", config)
@@ -1875,6 +1997,7 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
         out["status"] = "failed"
     _save_result_and_artifact(out, results_dir / "cohort_analysis.json", config)
     if errors:
+        _write_artifact_checklist(config, results_dir, data_dir)
         raise RuntimeError("Cohort analysis required outputs failed: " + "; ".join(errors))
     return out
 
@@ -1987,34 +2110,21 @@ def run_segment(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
     ).reset_index()
     summary["percentage"] = summary["count"] / len(result) * 100.0
     _save_result_and_artifact(summary, results_dir / "segment_summary.csv", config)
-    high_value_persuadable = result["segment"].eq("high_value_persuadable")
-    high_value_lost_cause = result["segment"].eq("high_value_lost_cause")
-    high_value_sure_thing = result["segment"].eq("high_value_sure_thing")
-    validation = {
-        "high_value_threshold": float(high_value_threshold),
-        "mid_value_threshold": float(mid_value_threshold),
-        "high_value_count": int(result["high_value"].sum()),
-        "high_risk_count": int(result["high_churn"].sum()),
-        "positive_uplift_count": int(result["positive_uplift"].sum()),
-        "high_value_persuadable_count": int(high_value_persuadable.sum()),
-        "high_value_lost_cause_count": int(high_value_lost_cause.sum()),
-        "high_value_sure_thing_count": int(high_value_sure_thing.sum()),
-        "high_value_high_risk_positive_uplift_count": int(
-            (result["high_value"] & result["high_churn"] & result["positive_uplift"]).sum()
+    segmenter = CustomerSegmenter(config=config.get("segmentation", {}))
+    validation = segmenter.build_value_uplift_evidence(
+        result,
+        clv_col="clv",
+        high_value_threshold=float(high_value_threshold),
+        high_churn_threshold=0.5,
+        neutral_uplift_threshold=float(
+            config.get("segmentation", {}).get("neutral_uplift_threshold", 0.05)
         ),
-        "high_value_high_risk_nonpositive_uplift_count": int(
-            (result["high_value"] & result["high_churn"] & ~result["positive_uplift"]).sum()
-        ),
-        "absence_reason": None,
-    }
-    if (
-        validation["high_value_persuadable_count"] == 0
-        and validation["high_value_lost_cause_count"] == 0
-        and validation["high_value_sure_thing_count"] == 0
-    ):
-        validation["absence_reason"] = (
-            "No high-value customer crossed the high-risk segment threshold in this run."
-        )
+    )
+    validation["mid_value_threshold"] = float(mid_value_threshold)
+    validation["high_value_sure_thing_count"] = int(
+        result["segment"].eq("high_value_sure_thing").sum()
+    )
+    validation["validation"] = segmenter.validate_value_uplift_evidence(validation)
     _save_result_and_artifact(validation, results_dir / "segment_validation.json", config)
 
     try:
@@ -2323,10 +2433,17 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         data_dir,
     )
     results["required_artifacts"] = checklist
-    if checklist["missing"]:
+    if not checklist["full_submission_ready"]:
         results["missing_required_artifacts"] = checklist["missing"]
+        failed = [
+            row["artifact"]
+            for row in checklist["artifacts"]
+            if not row["satisfied"]
+        ]
+        if not checklist["generation_summary_validation"]["valid"]:
+            failed.insert(0, "generation_summary.json")
         raise RuntimeError(
-            "Missing required pipeline artifacts: " + ", ".join(checklist["missing"])
+            "Full submission checklist failed: " + ", ".join(failed)
         )
     return results
 

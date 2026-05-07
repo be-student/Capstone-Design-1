@@ -16,6 +16,7 @@ Tests cover:
 - --small flag for simulation
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -37,6 +38,15 @@ from src.main import build_parser, load_config, main, MODES, _NumpyEncoder
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def isolated_cli_artifact_dirs(tmp_path, monkeypatch):
+    """Keep CLI tests from publishing fixture artifacts into repo defaults."""
+    monkeypatch.setattr("src.main.DEFAULT_DATA_DIR", tmp_path / "data" / "raw")
+    monkeypatch.setattr("src.main.DEFAULT_RESULTS_DIR", tmp_path / "results")
+    monkeypatch.setattr("src.main.DEFAULT_MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr("src.main.DEFAULT_ARTIFACTS_DIR", tmp_path / "artifacts")
+
 
 @pytest.fixture
 def sample_config():
@@ -110,6 +120,17 @@ def _cohort_test_frames(num_customers: int = 12):
             },
         ])
     return customers, pd.DataFrame(rows)
+
+
+def _artifact_snapshot(paths):
+    snapshot = {}
+    for path in paths:
+        if not path.exists():
+            snapshot[path] = None
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        snapshot[path] = (path.stat().st_size, digest)
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +431,37 @@ class TestMainIntegrationExtended:
         """main() should raise FileNotFoundError for missing config."""
         with pytest.raises(FileNotFoundError):
             main(["--mode", "train", "--config", "/nonexistent.yaml"])
+
+    def test_cohort_cli_temp_output_does_not_mutate_repo_default_artifacts(
+        self, config_file, tmp_path
+    ):
+        """Mocked cohort CLI runs must keep fixture artifacts out of repo defaults."""
+        project_root = Path(__file__).resolve().parent.parent
+        default_paths = [
+            project_root / "results" / "cohort_analysis.json",
+            project_root / "results" / "cohort_retention_matrix.csv",
+            project_root / "results" / "cohort_milestones.csv",
+            project_root / "results" / "churn_last30_sequences.json",
+            project_root / "data" / "artifacts" / "cohort_analysis.json",
+            project_root / "data" / "artifacts" / "cohort_retention_matrix.csv",
+            project_root / "data" / "artifacts" / "cohort_milestones.csv",
+            project_root / "data" / "artifacts" / "churn_last30_sequences.json",
+        ]
+        before = _artifact_snapshot(default_paths)
+
+        customers, events = _cohort_test_frames()
+        output_dir = tmp_path / "cli-output"
+        with patch("src.main._load_events", return_value=events), \
+             patch("src.main._load_customers", return_value=customers):
+            main([
+                "--mode", "cohort",
+                "--config", config_file,
+                "--output", str(output_dir),
+                "--quiet",
+            ])
+
+        assert _artifact_snapshot(default_paths) == before
+        assert (output_dir / "results" / "cohort_analysis.json").exists()
 
 
 # ---------------------------------------------------------------------------

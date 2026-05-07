@@ -105,6 +105,10 @@ class TestUpliftModelInterface:
         """Uplift model must be instantiable from config."""
         assert uplift_model is not None
 
+    def test_default_learner_is_auto(self, uplift_model):
+        """Default uplift output should not be pinned to one weaker learner."""
+        assert uplift_model.learner == "auto"
+
     def test_has_fit_method(self, uplift_model):
         """Uplift model must implement a fit method."""
         assert hasattr(uplift_model, "fit")
@@ -164,6 +168,27 @@ class TestUpliftModelTraining:
             treatment=treatment,
             y=sample_uplift_data["churn_label"],
         )
+
+    def test_auto_fit_records_selected_best_learner(
+        self, uplift_model, sample_uplift_data
+    ):
+        """Auto learner should fit candidates and keep the best AUUC model."""
+        feature_cols = [c for c in sample_uplift_data.columns
+                        if c.startswith("feature_")]
+        uplift_model.fit(
+            X=sample_uplift_data[feature_cols],
+            treatment=sample_uplift_data["is_treatment"],
+            y=sample_uplift_data["churn_label"],
+        )
+
+        assert uplift_model.requested_learner == "auto"
+        assert uplift_model.learner in {"t_learner", "s_learner"}
+        assert uplift_model.selection_metrics_ is not None
+        assert set(uplift_model.selection_metrics_["learner"]) == {
+            "t_learner", "s_learner"
+        }
+        best = uplift_model.selection_metrics_.iloc[0]
+        assert uplift_model.learner == best["learner"]
 
 
 # ---------------------------------------------------------------------------

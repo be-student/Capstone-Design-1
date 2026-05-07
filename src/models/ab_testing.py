@@ -14,7 +14,6 @@ Provides:
 All configurable parameters are read from the YAML config dictionary.
 """
 
-import hashlib
 import json
 import logging
 import uuid
@@ -664,6 +663,7 @@ class ABTestFramework:
             or int(result.get("treatment_size", 0)) < required_sample_size
             or int(result.get("control_size", 0)) < required_sample_size
         )
+        passes_power_gate = beneficial_significant and not is_underpowered
 
         return {
             "name": name or result.get("experiment_name") or result.get("name", "Experiment"),
@@ -673,7 +673,8 @@ class ABTestFramework:
             "control_churn_rate": control_rate,
             "lift": float(lift),
             "p_value": float(result.get("p_value", 1.0)),
-            "is_significant": beneficial_significant,
+            "is_significant": bool(passes_power_gate),
+            "statistically_significant": bool(beneficial_significant),
             "confidence_interval": [float(ci[0]), float(ci[1])],
             "effect_size_cohens_h": float(abs(effect_size)),
             "power": observed_power,
@@ -682,6 +683,7 @@ class ABTestFramework:
             "required_sample_size_per_group": required_sample_size,
             "required_total_sample_size": required_sample_size * 2,
             "is_underpowered": bool(is_underpowered),
+            "power_status": "underpowered" if is_underpowered else "adequately_powered",
             "alpha": float(result.get("alpha", 0.05)),
             "absolute_effect": absolute_effect,
             "test_type": result.get("test_used", result.get("test_type", "unknown")),

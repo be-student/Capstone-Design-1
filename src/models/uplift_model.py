@@ -44,12 +44,20 @@ class UpliftModel:
         Configuration dictionary. Uses 'simulation.random_seed' for
         reproducibility and optional 'uplift' section for model params.
     learner : str
-        Meta-learner type: 't_learner' or 's_learner'. Default: 't_learner'.
+        Meta-learner type: 'auto', 't_learner' or 's_learner'. Default:
+        'auto', which selects the fitted learner with the best AUUC.
     """
 
-    def __init__(self, config: dict, learner: str = "t_learner"):
+    VALID_LEARNERS = {"auto", "t_learner", "s_learner"}
+
+    def __init__(self, config: dict, learner: str = "auto"):
+        if learner not in self.VALID_LEARNERS:
+            raise ValueError(
+                f"learner must be one of {sorted(self.VALID_LEARNERS)}; got {learner!r}"
+            )
         self.config = config
         self.learner = learner
+        self.requested_learner = learner
         self.seed = config.get("simulation", {}).get("random_seed", 42)
 
         # Uplift-specific config
@@ -70,6 +78,7 @@ class UpliftModel:
         self._single_model = None  # For S-Learner
         self._is_fitted = False
         self._feature_names = None
+        self.selection_metrics_: Optional[pd.DataFrame] = None
 
     def _make_base_model(self):
         """Create a base classifier for uplift estimation."""
@@ -112,14 +121,56 @@ class UpliftModel:
         treatment_mask = treatment_arr == 1
         control_mask = treatment_arr == 0
 
-        if self.learner == "t_learner":
+        learner_to_fit = self.requested_learner
+        if learner_to_fit == "auto":
+            self._fit_auto(X, treatment, y)
+        elif learner_to_fit == "t_learner":
+            self.learner = "t_learner"
             self._fit_t_learner(X_arr, y_arr, treatment_mask, control_mask)
-        else:
+            self.selection_metrics_ = None
+        elif learner_to_fit == "s_learner":
+            self.learner = "s_learner"
             self._fit_s_learner(X_arr, y_arr, treatment_arr)
+            self.selection_metrics_ = None
 
         self._is_fitted = True
         logger.info("Uplift model fitted using %s approach", self.learner)
         return self
+
+    def _fit_auto(
+        self,
+        X: Union[pd.DataFrame, np.ndarray],
+        treatment: Union[pd.Series, np.ndarray],
+        y: Union[pd.Series, np.ndarray],
+    ) -> None:
+        """Fit candidate learners and keep the best available AUUC model."""
+        comparison_rows = []
+        candidates: Dict[str, "UpliftModel"] = {}
+        for learner in ("t_learner", "s_learner"):
+            candidate = UpliftModel(self.config, learner=learner)
+            candidate.fit(X, treatment, y)
+            scores = candidate.predict_uplift(X)
+            comparison_rows.append({
+                "learner": learner,
+                "auuc": candidate.compute_auuc(y, scores, treatment),
+                "mean_uplift": float(np.mean(scores)),
+                "std_uplift": float(np.std(scores)),
+            })
+            candidates[learner] = candidate
+
+        comparison = pd.DataFrame(comparison_rows).sort_values(
+            ["auuc", "mean_uplift"], ascending=[False, False]
+        ).reset_index(drop=True)
+        selected = str(comparison.iloc[0]["learner"])
+        chosen = candidates[selected]
+
+        self.learner = selected
+        self._treatment_model = chosen._treatment_model
+        self._control_model = chosen._control_model
+        self._single_model = chosen._single_model
+        self._feature_names = chosen._feature_names
+        self.selection_metrics_ = comparison
+        logger.info("Auto-selected uplift learner %s", selected)
 
     def _fit_t_learner(
         self,
@@ -174,8 +225,9 @@ class UpliftModel:
 
         if self.learner == "t_learner":
             return self._predict_t_learner(X_arr)
-        else:
+        elif self.learner == "s_learner":
             return self._predict_s_learner(X_arr)
+        raise RuntimeError(f"Unsupported fitted learner: {self.learner}")
 
     def _predict_t_learner(self, X: np.ndarray) -> np.ndarray:
         """Predict uplift using T-Learner."""
@@ -390,6 +442,11 @@ class UpliftModel:
 
         state = {
             "learner": self.learner,
+            "requested_learner": self.requested_learner,
+            "selection_metrics": (
+                self.selection_metrics_.to_dict(orient="records")
+                if self.selection_metrics_ is not None else None
+            ),
             "seed": self.seed,
             "n_estimators": self.n_estimators,
             "max_depth": self.max_depth,
@@ -440,11 +497,14 @@ class UpliftModel:
         }
 
         model = cls(config, learner=state["learner"])
+        model.requested_learner = state.get("requested_learner", state["learner"])
         model._treatment_model = state["treatment_model"]
         model._control_model = state["control_model"]
         model._single_model = state["single_model"]
         model._is_fitted = state["is_fitted"]
         model._feature_names = state["feature_names"]
+        if state.get("selection_metrics") is not None:
+            model.selection_metrics_ = pd.DataFrame(state["selection_metrics"])
 
         logger.info("Uplift model loaded from %s", load_path)
         return model

@@ -163,6 +163,20 @@ class TestSegmentationEdgeCases:
         assert set(comparison["learner"]) >= {"t_learner", "s_learner"}
         assert "auuc" in comparison.columns
 
+    def test_default_auto_selects_best_auuc_learner(self, config, simple_data):
+        """Default model output should use the best available learner."""
+        X, treatment, y = simple_data
+        auto_model = UpliftModel(config)
+        auto_model.fit(X, treatment, y)
+
+        assert auto_model.requested_learner == "auto"
+        assert auto_model.learner in {"t_learner", "s_learner"}
+        assert auto_model.selection_metrics_ is not None
+        best = auto_model.selection_metrics_.sort_values(
+            ["auuc", "mean_uplift"], ascending=[False, False]
+        ).iloc[0]
+        assert auto_model.learner == best["learner"]
+
 
 # ---------------------------------------------------------------------------
 # AUUC edge cases

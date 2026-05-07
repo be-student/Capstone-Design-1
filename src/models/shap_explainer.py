@@ -213,6 +213,89 @@ class ShapExplainer:
         shap_values = self.compute_shap_values(X)
         return pd.DataFrame(shap_values, columns=self.feature_names, index=X.index)
 
+    def export_local_explanations(
+        self,
+        X: pd.DataFrame,
+        output_path: str,
+        prediction_probabilities: Optional[Union[np.ndarray, List[float]]] = None,
+        customer_ids: Optional[Union[pd.Series, np.ndarray, List[Any]]] = None,
+        top_n_samples: int = 5,
+        top_k_features: int = 10,
+    ) -> pd.DataFrame:
+        """Persist representative high-risk local SHAP explanations.
+
+        The export is intentionally row-oriented so downstream checklist and
+        dashboard code can validate a stable schema without parsing nested
+        objects. Each selected customer contributes its top feature-level SHAP
+        drivers sorted by absolute contribution.
+        """
+        if X.empty:
+            raise ValueError("X must contain at least one row.")
+
+        self._ensure_feature_names(X)
+        n_samples = min(max(int(top_n_samples), 1), len(X))
+        k_features = min(max(int(top_k_features), 1), X.shape[1])
+
+        if prediction_probabilities is None:
+            raw_model = getattr(self.ml_model, "predict_proba", None)
+            if raw_model is None:
+                probabilities = np.zeros(len(X), dtype=np.float64)
+            else:
+                raw_probabilities = np.asarray(raw_model(X), dtype=np.float64)
+                probabilities = (
+                    raw_probabilities[:, 1]
+                    if raw_probabilities.ndim == 2 and raw_probabilities.shape[1] > 1
+                    else raw_probabilities.ravel()
+                )
+        else:
+            probabilities = np.asarray(prediction_probabilities, dtype=np.float64).ravel()
+
+        if probabilities.shape[0] != len(X):
+            raise ValueError("prediction_probabilities length must match X.")
+
+        if customer_ids is None:
+            customer_arr = X.index.to_numpy()
+        else:
+            customer_arr = np.asarray(customer_ids)
+            if customer_arr.shape[0] != len(X):
+                raise ValueError("customer_ids length must match X.")
+
+        selected_positions = np.argsort(-probabilities)[:n_samples]
+        shap_values = self.compute_shap_values(X)
+        base_value = self._explainer.expected_value
+        if isinstance(base_value, (list, np.ndarray)):
+            base_value = base_value[1] if len(base_value) > 1 else base_value[0]
+
+        rows = []
+        for sample_rank, pos in enumerate(selected_positions, start=1):
+            contributions = shap_values[pos]
+            top_feature_positions = np.argsort(-np.abs(contributions))[:k_features]
+            for feature_rank, feat_pos in enumerate(top_feature_positions, start=1):
+                feature = self.feature_names[feat_pos]
+                shap_value = float(contributions[feat_pos])
+                rows.append({
+                    "customer_id": customer_arr[pos],
+                    "sample_rank": sample_rank,
+                    "feature_rank": feature_rank,
+                    "predicted_churn_probability": float(probabilities[pos]),
+                    "base_value": float(base_value),
+                    "feature": feature,
+                    "feature_value": float(X.iloc[pos][feature]),
+                    "shap_value": shap_value,
+                    "abs_shap_value": abs(shap_value),
+                })
+
+        result = pd.DataFrame(rows).sort_values(
+            ["sample_rank", "abs_shap_value"],
+            ascending=[True, False],
+        ).reset_index(drop=True)
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output, index=False)
+        logger.info("Saved local SHAP explanations to %s", output)
+        return result
+
     # ------------------------------------------------------------------
     # Plot methods (all save to file, non-interactive)
     # ------------------------------------------------------------------

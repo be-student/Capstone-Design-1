@@ -208,7 +208,34 @@ class TestReportingHelpers:
         assert "metrics" in result
         assert "predictions" in result
         assert "correlation" in result["metrics"]
+        assert result["metrics"]["validation_type"] == "actual_vs_predicted_holdout"
         assert "actual_clv" in result["predictions"].columns
+
+    def test_future_revenue_labels_use_post_cutoff_purchases(self):
+        """Future-window CLV labels should be separate from observation features."""
+        events = pd.DataFrame({
+            "customer_id": ["C001", "C001", "C002", "C002"],
+            "event_date": [
+                "2024-01-05",
+                "2024-03-01",
+                "2024-01-10",
+                "2024-04-01",
+            ],
+            "event_type": ["purchase", "purchase", "purchase", "page_view"],
+            "amount": [100.0, 300.0, 50.0, 999.0],
+        })
+
+        labels = CLVModel.future_revenue_labels(
+            events,
+            cutoff_date="2024-02-01",
+            customer_ids=["C001", "C002"],
+        )
+
+        label_df = labels["labels"].set_index("customer_id")
+        assert labels["metadata"]["target"] == "future_revenue_12m_actual"
+        assert labels["metadata"]["validation_type"] == "temporal_actual_vs_predicted"
+        assert label_df.loc["C001", "future_revenue_12m_actual"] > 0
+        assert label_df.loc["C002", "future_revenue_12m_actual"] == 0
 
     def test_build_value_report_returns_top_n(self, fitted_model, rfm_data):
         ids = [f"C{i}" for i in range(len(rfm_data))]
