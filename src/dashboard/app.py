@@ -33,6 +33,7 @@ from src.dashboard.monitoring_view import (
 )
 from src.dashboard.recommendations_view import render_recommendations_view
 from src.dashboard.system_health_view import render_system_health
+from src.dashboard.system_health_view import resolve_redis_connection_config
 from src.dashboard.utils.dashboard_helpers import (
     PAGES,
     classify_risk,
@@ -3513,7 +3514,7 @@ def _render_scoring_status_tab(st_module, config: Dict, data_loader):
         data_loader: DashboardDataLoader instance.
     """
     st = st_module
-    redis_config = config.get("redis", {})
+    redis_config = resolve_redis_connection_config(config)
 
     st.subheader("Service Health")
 
@@ -3526,16 +3527,16 @@ def _render_scoring_status_tab(st_module, config: Dict, data_loader):
     try:
         import redis as redis_lib
         r = redis_lib.Redis(
-            host=redis_config.get("host", "localhost"),
-            port=redis_config.get("port", 6379),
-            db=redis_config.get("db", 0),
+            host=redis_config["host"],
+            port=redis_config["port"],
+            db=redis_config["db"],
             socket_connect_timeout=2,
         )
         r.ping()
         redis_healthy = True
         redis_status = "Connected"
-        req_stream = redis_config.get("stream_name", "scoring_requests")
-        resp_stream = redis_config.get("response_stream", "scoring_responses")
+        req_stream = redis_config["stream_name"]
+        resp_stream = redis_config["response_stream"]
         stream_len_req = r.xlen(req_stream) if r.exists(req_stream) else 0
         stream_len_resp = r.xlen(resp_stream) if r.exists(resp_stream) else 0
     except Exception:
@@ -3554,24 +3555,20 @@ def _render_scoring_status_tab(st_module, config: Dict, data_loader):
         st.metric("Response Stream", format_count(stream_len_resp))
     with col4:
         st.metric("Consumer Group",
-                   redis_config.get("consumer_group", "scoring_consumers"))
+                   redis_config["consumer_group"])
 
     # Redis configuration details
     with st.expander("Redis Configuration Details"):
         st.json({
-            "host": redis_config.get("host", "localhost"),
-            "port": redis_config.get("port", 6379),
-            "db": redis_config.get("db", 0),
-            "stream_name": redis_config.get("stream_name", "scoring_requests"),
-            "response_stream": redis_config.get(
-                "response_stream", "scoring_responses"
-            ),
-            "consumer_group": redis_config.get(
-                "consumer_group", "scoring_consumers"
-            ),
-            "consumer_batch_size": redis_config.get("consumer_batch_size", 10),
-            "stream_maxlen": redis_config.get("stream_maxlen", 10000),
-            "cache_ttl_seconds": redis_config.get("cache_ttl_seconds", 3600),
+            "host": redis_config["host"],
+            "port": redis_config["port"],
+            "db": redis_config["db"],
+            "stream_name": redis_config["stream_name"],
+            "response_stream": redis_config["response_stream"],
+            "consumer_group": redis_config["consumer_group"],
+            "consumer_batch_size": redis_config["consumer_batch_size"],
+            "stream_maxlen": redis_config["stream_maxlen"],
+            "cache_ttl_seconds": redis_config["cache_ttl_seconds"],
         })
 
     st.markdown("---")

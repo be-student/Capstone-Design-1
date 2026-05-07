@@ -1,7 +1,7 @@
 # Requirement Traceability
 
-This note records where the `require.md` submission guardrails and the v4
-blocker-closure evidence are reflected in the repository. `issue_final_v4.md`
+This note records where the `require.md` submission guardrails and the v5
+blocker-closure evidence are reflected in the repository. `issue_final_v5.md`
 is already PASS, so this file is the current traceability index for
 requirement-level verification.
 
@@ -23,7 +23,7 @@ requirement-level verification.
 | Monitoring report and drift/performance history | §5.12, §9 | `src/main.py::run_monitor`, `src/monitoring/drift_detection.py`, `src/monitoring/ks_drift.py`, `src/monitoring/monitoring_service.py`, `tests/test_drift_detection.py`, `tests/test_ks_drift.py`. |
 | Documentation, architecture diagram, docstrings, and module separation | §5.13, §7, G1-G7 | `README.md`, `docs/README.md`, `docs/architecture.md`, `docs/deployment.md`, `docs/models.md`, `docs/modules.md`, `docs/usage.md`, `docs/api.md`, module-level tests under `tests/`. |
 
-Current v4 artifact evidence:
+Current v5 artifact evidence:
 
 - `python src/main.py --mode all` completed via resume and wrote `results/required_artifacts_checklist.json`.
 - `results/required_artifacts_checklist.json`: `29 / 29` satisfied, `missing: []`, `full_submission_ready: true`.
@@ -33,20 +33,34 @@ Current v4 artifact evidence:
 - `results/segment_validation.json`: structured absence report is present, `absence_reason` is non-null, and `validation.valid: true` with reason `structured_absence_report_present`.
 - `results/ab_test_detailed.json`: includes `required_sample_size_per_group`, `required_total_sample_size`, `observed_power`, `design_power`, `is_underpowered`, `power_status`, and `statistically_significant`.
 
-Current v4 verification evidence: targeted pytest suite passed with `1339 passed, 1 skipped, 6 warnings`.
+Current v5 verification evidence:
 
-## issue_final_v2 follow-up fixes
+- Fresh-context lane 6 rerun passed with `253 passed`.
+- Main full pytest passed with `2558 passed, 1 skipped, 66 warnings`.
+- Full pipeline smoke passed with `python src/main.py --mode all --quiet`.
+- `docker compose config --quiet` passed.
+- `git diff --check` passed.
 
-The fresh-context six-agent verification summarized in `issue_final_v2.md`
-found five remaining blockers. The follow-up implementation was reflected here:
+## issue_final_v5 blocker-closure fixes
 
-| issue_final_v2 blocker | Reflected in |
+The require-first verification cycles through `issue_final_v5.md` found and
+closed the remaining implementation, artifact, dashboard, and documentation
+blockers. The follow-up implementation is reflected here:
+
+| Closed blocker area | Reflected in |
 | --- | --- |
 | Cohort M1/M3/M6/M12, churn-last-30 top-5, pre-churn event, journey funnel artifacts | `src/analysis/cohort_analysis.py` normalizes event schema and computes exact M1/M3/M6/M12 milestones for the current full run; `src/main.py::run_cohort` records milestone policy and writes `cohort_milestones.csv`, `churn_last30_sequences.json`, `pre_churn_events.csv`, and `journey_funnel.csv`. |
 | Recommendation active actions for negative uplift / sleeping dogs | `src/models/recommendations.py` adds explicit `no_action` policy; `src/main.py::run_recommend` now builds recommendations from `segments_6plus.csv`, `uplift_results.csv`, and `clv_predictions.csv` with segment/uplift/CLV/churn/ROI context. |
 | Stale cached feature and pipeline resume risk | `src/main.py::_compute_features` validates cached feature rows/customer IDs against current input and current results directory; `src/main.py::run_all` validates checkpoint state against run context, directories, simulation size, and step order. |
 | Artifact checklist existence-only risk | `src/main.py::_write_artifact_checklist` now validates required artifact schemas/content and syncs existing `results/` files into `data/artifacts/`; the checklist now covers 29 artifacts including cohort milestones, churn sequences, journey outputs, recommendations, and generation summary validation. |
 | Dashboard monitoring/performance history loading | `src/dashboard/data_loader.py` reads `model_performance_history.csv` for AUC/Precision/Recall histories and no longer hides an existing incomplete cohort matrix behind generated sample data. |
+| Simulator-to-feature evidence and sanitation | `src/data/generator.py` writes session-duration evidence for visit events, and `src/features/feature_engineering.py` sanitizes numeric missing, infinite, and outlier values before storing features. |
+| ML imbalance and scoring probability semantics | `src/models/churn_model.py` applies class-imbalance handling consistently across CV/tuning/final paths, and scoring uses the positive churn class probability. |
+| Uplift direction and Persuadables analysis | `src/models/uplift_model.py` keeps AUUC/Qini direction aligned to churn reduction and exposes Persuadables targeting analysis evidence. |
+| A/B significance schema clarity | `src/models/ab_testing.py` separates p-value significance from rollout gating, preserving `statistically_significant` as the p-value field and `is_significant` as the powered beneficial gate. |
+| Dashboard required-evidence fallback removal | Dashboard loaders and views expose missing/invalid required artifacts instead of showing generated sample fallback for required cohort and A/B evidence. |
+| MLflow native crash stability | `tests/test_mlflow_tracking.py` uses deterministic sklearn tree-model doubles for tracker assertions, avoiding native LightGBM/XGBoost crash surfaces while preserving MLflow metric coverage. |
+| Documentation and traceability drift | `README.md`, `docs/deployment.md`, `docs/models.md`, and this traceability index align `--small`, `pipeline_state.json`, artifact-readiness, and final verification wording with current behavior. |
 
 Current focused verification after these fixes:
 
@@ -56,4 +70,6 @@ Current focused verification after these fixes:
 - `results/journey_funnel.csv`: `Signup` count is 20,000.
 - `results/segment_validation.json`: structured absence report present; `absence_reason` is populated; validation is true with reason `structured_absence_report_present`.
 - `results/ab_test_detailed.json`: power-analysis and significance fields are present for detailed A/B reporting.
-- Integration targeted pytest: `1339 passed, 1 skipped, 6 warnings`.
+- Fresh-context lane 6 targeted pytest: `253 passed`.
+- Full pytest: `2558 passed, 1 skipped, 66 warnings`.
+- Full pipeline smoke, Docker Compose config validation, and `git diff --check` passed.

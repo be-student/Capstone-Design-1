@@ -97,6 +97,7 @@ def scale_sequences(
     if seq.ndim != 3:
         raise ValueError("Expected sequences with shape (n, t, f).")
 
+    padding_mask = np.all(seq == 0.0, axis=-1)
     flattened = seq.reshape(-1, seq.shape[-1])
     if feature_mean is None:
         feature_mean = flattened.mean(axis=0)
@@ -105,6 +106,7 @@ def scale_sequences(
 
     scaled = ((seq - feature_mean.reshape(1, 1, -1))
               / feature_std.reshape(1, 1, -1)).astype(np.float32)
+    scaled[padding_mask] = 0.0
     return {
         "sequences": scaled,
         "feature_mean": feature_mean.astype(np.float32),

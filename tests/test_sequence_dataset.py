@@ -243,6 +243,36 @@ class TestSequencePreparation:
         assert result["sequence_source"] == "event_sequence"
         assert result["sequences"].shape[1] == window_size
 
+    def test_scaled_real_sequences_preserve_padding_rows(self):
+        """Standardization must not turn padded timesteps into fake activity."""
+        from src.models.sequence_utils import prepare_sequence_training_data
+
+        data = pd.DataFrame(
+            [
+                ["C1", 1, 10.0, 20.0],
+                ["C2", 1, 30.0, 40.0],
+                ["C2", 2, 50.0, 60.0],
+                ["C2", 3, 70.0, 80.0],
+            ],
+            columns=["customer_id", "month", "f1", "f2"],
+        )
+        labels = pd.DataFrame({
+            "customer_id": ["C1", "C2"],
+            "churn_label": [1, 0],
+        })
+
+        result = prepare_sequence_training_data(
+            data,
+            labels=labels,
+            window_size=3,
+            time_col="month",
+            customer_col="customer_id",
+        )
+
+        c1_idx = result["customer_ids"].index("C1")
+        assert np.all(result["sequences"][c1_idx, :2, :] == 0.0)
+        assert not np.all(result["sequences"][c1_idx, 2, :] == 0.0)
+
     def test_tabular_to_pseudo_sequences_marks_source(self):
         """Pseudo-sequence fallback should remain explicit."""
         from src.models.sequence_utils import tabular_to_pseudo_sequences

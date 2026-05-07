@@ -11,6 +11,7 @@ All configurable parameters are sourced from config/simulator_config.yaml.
 """
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,6 +42,22 @@ STATUS_ICONS = {
 }
 
 
+def resolve_redis_connection_config(config: Dict) -> Dict[str, Any]:
+    """Resolve Redis connection settings with Docker env overrides."""
+    redis_config = config.get("redis", {})
+    return {
+        "host": os.environ.get("REDIS_HOST", redis_config.get("host", "localhost")),
+        "port": int(os.environ.get("REDIS_PORT", redis_config.get("port", 6379))),
+        "db": int(os.environ.get("REDIS_DB", redis_config.get("db", 0))),
+        "stream_name": redis_config.get("stream_name", "scoring_requests"),
+        "response_stream": redis_config.get("response_stream", "scoring_responses"),
+        "consumer_group": redis_config.get("consumer_group", "scoring_consumers"),
+        "consumer_batch_size": redis_config.get("consumer_batch_size", 10),
+        "stream_maxlen": redis_config.get("stream_maxlen", 10000),
+        "cache_ttl_seconds": redis_config.get("cache_ttl_seconds", 3600),
+    }
+
+
 def check_redis_health(config: Dict) -> Dict[str, Any]:
     """Check Redis streaming pipeline health.
 
@@ -51,12 +68,12 @@ def check_redis_health(config: Dict) -> Dict[str, Any]:
         Dict with status, connected, stream_lengths, consumer_groups,
         memory_used, uptime, and error details.
     """
-    redis_config = config.get("redis", {})
+    redis_config = resolve_redis_connection_config(config)
     result = {
         "status": STATUS_DOWN,
         "connected": False,
-        "host": redis_config.get("host", "localhost"),
-        "port": redis_config.get("port", 6379),
+        "host": redis_config["host"],
+        "port": redis_config["port"],
         "stream_lengths": {},
         "consumer_groups": {},
         "memory_used_mb": 0,
@@ -69,7 +86,7 @@ def check_redis_health(config: Dict) -> Dict[str, Any]:
         r = redis_lib.Redis(
             host=result["host"],
             port=result["port"],
-            db=redis_config.get("db", 0),
+            db=redis_config["db"],
             socket_connect_timeout=2,
         )
         r.ping()
@@ -77,8 +94,8 @@ def check_redis_health(config: Dict) -> Dict[str, Any]:
         result["status"] = STATUS_HEALTHY
 
         # Stream lengths
-        req_stream = redis_config.get("stream_name", "scoring_requests")
-        resp_stream = redis_config.get("response_stream", "scoring_responses")
+        req_stream = redis_config["stream_name"]
+        resp_stream = redis_config["response_stream"]
         for stream_name in [req_stream, resp_stream]:
             try:
                 if r.exists(stream_name):
@@ -505,7 +522,7 @@ def _render_streaming_status(
     st.subheader("Streaming Pipeline Status")
 
     redis_health = health.get("services", {}).get("redis", {})
-    redis_config = config.get("redis", {})
+    redis_config = resolve_redis_connection_config(config)
 
     # Stream configuration
     col_config, col_metrics = st.columns(2)
@@ -513,14 +530,14 @@ def _render_streaming_status(
     with col_config:
         st.markdown("#### Configuration")
         st.json({
-            "host": redis_config.get("host", "localhost"),
-            "port": redis_config.get("port", 6379),
-            "request_stream": redis_config.get("stream_name", "scoring_requests"),
-            "response_stream": redis_config.get("response_stream", "scoring_responses"),
-            "consumer_group": redis_config.get("consumer_group", "scoring_consumers"),
-            "batch_size": redis_config.get("consumer_batch_size", 10),
-            "max_stream_length": redis_config.get("stream_maxlen", 10000),
-            "cache_ttl_seconds": redis_config.get("cache_ttl_seconds", 3600),
+            "host": redis_config["host"],
+            "port": redis_config["port"],
+            "request_stream": redis_config["stream_name"],
+            "response_stream": redis_config["response_stream"],
+            "consumer_group": redis_config["consumer_group"],
+            "batch_size": redis_config["consumer_batch_size"],
+            "max_stream_length": redis_config["stream_maxlen"],
+            "cache_ttl_seconds": redis_config["cache_ttl_seconds"],
         })
 
     with col_metrics:

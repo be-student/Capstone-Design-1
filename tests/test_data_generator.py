@@ -654,6 +654,51 @@ class TestSingleCustomerEventGenerator:
             f"control ({ctrl_coupons})"
         )
 
+    def test_purchase_frequency_monthly_controls_purchase_volume(
+        self, single_customer_generator, config
+    ):
+        """Configured monthly purchase frequency should shape purchase volume."""
+        gen = single_customer_generator
+        signup = pd.Timestamp(config["simulation"]["start_date"])
+        base_cfg = gen._get_persona_config("regular_loyal")
+
+        low_freq = {
+            **base_cfg,
+            "purchase_frequency_monthly": 0.5,
+            "engagement": {
+                **base_cfg["engagement"],
+                "daily_visit_prob": 0.70,
+                "cart_add_per_visit": 2.0,
+                "cart_to_purchase_rate": 0.80,
+            },
+            "churn_probability": 0.0,
+        }
+        high_freq = {
+            **low_freq,
+            "purchase_frequency_monthly": 8.0,
+        }
+
+        gen.rng = np.random.RandomState(gen.seed)
+        low_events = gen._generate_customer_events(
+            "C_low_freq", low_freq, signup, is_treatment=False,
+        )
+        gen.rng = np.random.RandomState(gen.seed)
+        high_events = gen._generate_customer_events(
+            "C_high_freq", high_freq, signup, is_treatment=False,
+        )
+
+        low_purchases = sum(
+            1 for event in low_events if event["event_type"] == "purchase"
+        )
+        high_purchases = sum(
+            1 for event in high_events if event["event_type"] == "purchase"
+        )
+
+        assert high_purchases > low_purchases * 2, (
+            f"High frequency purchases ({high_purchases}) should clearly exceed "
+            f"low frequency purchases ({low_purchases})"
+        )
+
     def test_behavior_decay_reduces_late_activity(
         self, single_customer_generator, config
     ):

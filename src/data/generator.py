@@ -371,6 +371,9 @@ class CustomerDataGenerator:
         cs_monthly = eng["cs_contact_monthly"]
         avg_session_minutes = eng["avg_session_minutes"]
         weekend_boost = eng["weekend_activity_boost"]
+        target_purchase_frequency = float(
+            persona_cfg.get("purchase_frequency_monthly", 0.0)
+        )
 
         # Decay rates
         visit_decay = decay["visit_decay_rate"]
@@ -510,10 +513,16 @@ class CustomerDataGenerator:
             # purchase decision
             if n_cart_adds > 0:
                 # Decay purchase probability over time
-                purchase_prob = cart_to_purchase * max(
+                conversion_propensity = cart_to_purchase * max(
                     0.12,
                     1.0 - (purchase_cycle_inc / 30.0) * month_idx
                 )
+                expected_visit_days = max(1.0, 30.0 * decayed_visit_prob)
+                frequency_propensity = min(
+                    1.0,
+                    target_purchase_frequency / expected_visit_days,
+                )
+                purchase_prob = min(conversion_propensity, frequency_propensity)
                 # Add coupon conversion lift for treatment
                 purchase_prob = min(1.0, purchase_prob + coupon_lift)
 

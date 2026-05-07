@@ -196,6 +196,36 @@ class TestRedisHealthCheck:
         assert result["status"] == "down"
         assert not result["connected"]
 
+    def test_redis_health_uses_docker_env_overrides(self, monkeypatch):
+        """Docker REDIS_* env vars should override YAML defaults."""
+        from src.dashboard.system_health_view import check_redis_health
+
+        redis_client = MagicMock()
+        redis_client.ping.return_value = True
+        redis_client.exists.return_value = False
+        redis_client.info.return_value = {
+            "used_memory": 0,
+            "uptime_in_seconds": 1,
+        }
+
+        redis_cls = MagicMock(return_value=redis_client)
+        monkeypatch.setenv("REDIS_HOST", "redis")
+        monkeypatch.setenv("REDIS_PORT", "6380")
+        monkeypatch.setenv("REDIS_DB", "2")
+
+        with patch.dict("sys.modules", {"redis": MagicMock(Redis=redis_cls)}):
+            result = check_redis_health({
+                "redis": {"host": "localhost", "port": 6379, "db": 0}
+            })
+
+        redis_cls.assert_called_once()
+        assert redis_cls.call_args.kwargs["host"] == "redis"
+        assert redis_cls.call_args.kwargs["port"] == 6380
+        assert redis_cls.call_args.kwargs["db"] == 2
+        assert result["host"] == "redis"
+        assert result["port"] == 6380
+        assert result["status"] == "healthy"
+
 
 # ---------------------------------------------------------------------------
 # Test: MLflow Health Check
