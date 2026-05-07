@@ -541,6 +541,26 @@ class TestSurvivalModelPersistence:
             original_surv, loaded_surv, decimal=5,
         )
 
+    def test_save_with_explicit_pkl_suffix_does_not_duplicate(
+        self, survival_model, sample_survival_data, feature_cols, tmp_path
+    ):
+        """Explicit .pkl paths should not become .pkl.pkl."""
+        from src.models.survival_analysis import SurvivalModel
+
+        survival_model.fit(
+            X=sample_survival_data[feature_cols],
+            duration=sample_survival_data["duration"],
+            event=sample_survival_data["event"],
+        )
+
+        model_path = tmp_path / "survival_model.pkl"
+        survival_model.save(str(model_path))
+
+        assert model_path.exists()
+        assert not (tmp_path / "survival_model.pkl.pkl").exists()
+        loaded = SurvivalModel.load(str(model_path))
+        assert loaded.concordance_index == survival_model.concordance_index
+
 
 # ---------------------------------------------------------------------------
 # Reproducibility tests

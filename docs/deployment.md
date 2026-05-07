@@ -134,7 +134,7 @@ docker compose logs -f pipeline
 **Common quick-start scenarios:**
 
 ```bash
-# Full pipeline with small dataset (fastest)
+# Development smoke run with reduced data; not full submission readiness
 SMALL=true docker compose up --build
 
 # Dashboard only (skip pipeline, assumes data exists)
@@ -467,7 +467,7 @@ docker compose run pipeline python -m src.main --mode train
 docker compose run pipeline python -m src.main --mode optimize --budget 50000000
 docker compose run pipeline python -m src.main --mode simulate --small -v
 
-# Full pipeline with small dataset
+# Development smoke run with reduced data; not full submission readiness
 SMALL=true docker compose up --build
 ```
 
@@ -520,14 +520,17 @@ The `all` mode runs the complete end-to-end pipeline in this order:
 On restart, completed stages are automatically skipped:
 
 ```bash
-# First run (may fail at step 8)
-python src/main.py --mode all --small
+# First full submission run (may fail at step 8)
+python src/main.py --mode all
 
 # Resume from last checkpoint (steps 1-7 are skipped)
-python src/main.py --mode all --small
+python src/main.py --mode all
 
 # Force re-run from scratch
 rm data/raw/pipeline_state.json
+python src/main.py --mode all
+
+# Development smoke run only; this does not satisfy full submission readiness
 python src/main.py --mode all --small
 ```
 
@@ -1024,7 +1027,8 @@ PIPELINE_MODE=ab_test docker compose up pipeline
 PIPELINE_MODE=survival docker compose up pipeline
 PIPELINE_MODE=recommend docker compose up pipeline
 PIPELINE_MODE=cohort docker compose up pipeline
-PIPELINE_MODE=all SMALL=true docker compose up --build
+PIPELINE_MODE=all docker compose up --build
+PIPELINE_MODE=all SMALL=true docker compose up --build  # Development smoke only
 
 # ──── Pipeline Modes (via CLI) ────
 python src/main.py --mode simulate --small
@@ -1039,7 +1043,8 @@ python src/main.py --mode cohort --cohort-type monthly
 python src/main.py --mode segment
 python src/main.py --mode monitor
 python src/main.py --mode dashboard
-python src/main.py --mode all --small
+python src/main.py --mode all
+python src/main.py --mode all --small  # Development smoke only
 
 # ──── Dashboard ────
 SKIP_PIPELINE=true docker compose up dashboard   # Dashboard only

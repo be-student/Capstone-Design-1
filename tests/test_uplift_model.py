@@ -413,6 +413,18 @@ class TestAUUCMetric:
         )
         assert auuc > 0, f"AUUC {auuc:.4f} should be positive"
 
+    def test_auuc_sign_matches_churn_reduction_direction(self, uplift_model):
+        """Ranking beneficial treatment reductions first should improve AUUC."""
+        y = np.array([0, 1, 0, 1, 1, 0])
+        treatment = np.array([1, 0, 1, 0, 1, 0])
+        good_ranking = np.array([0.9, 0.8, 0.1, 0.0, -0.1, -0.2])
+        bad_ranking = -good_ranking
+
+        good_auuc = uplift_model.compute_auuc(y, good_ranking, treatment)
+        bad_auuc = uplift_model.compute_auuc(y, bad_ranking, treatment)
+
+        assert good_auuc > bad_auuc
+
 
 # ---------------------------------------------------------------------------
 # Model persistence tests

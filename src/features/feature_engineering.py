@@ -110,14 +110,7 @@ class FeatureEngineer:
                 ref_date - result["signup_date"]
             ).dt.days.clip(lower=0)
 
-        # Fill remaining NaN with 0 and replace inf
-        numeric_cols = result.select_dtypes(include=[np.number]).columns
-        for col in numeric_cols:
-            result[col] = result[col].replace(
-                [np.inf, -np.inf], np.nan
-            ).fillna(0)
-
-        return result
+        return self._sanitize_feature_matrix(result)
 
     # ------------------------------------------------------------------
     # RFM Features
@@ -461,9 +454,14 @@ class FeatureEngineer:
 
             # Session duration
             if "session_duration" in events.columns:
-                row["avg_session_duration"] = float(
-                    cust_events["session_duration"].mean()
-                )
+                durations = cust_events["session_duration"].dropna()
+                if len(durations) > 0:
+                    row["avg_session_duration"] = float(durations.mean())
+                else:
+                    n_days = cust_events["event_date"].nunique()
+                    row["avg_session_duration"] = (
+                        len(cust_events) / max(1, n_days)
+                    )
             else:
                 # Estimate from events per unique day
                 n_days = cust_events["event_date"].nunique()
@@ -915,6 +913,30 @@ class FeatureEngineer:
         if np.isnan(result) or np.isinf(result):
             return default
         return float(result)
+
+    def _sanitize_feature_matrix(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Apply final missing-value and outlier handling to numeric features."""
+        result = features.copy()
+        numeric_cols = result.select_dtypes(include=[np.number]).columns
+        exclude = {
+            "customer_id",
+            "churn_label",
+            "journey_stage",
+            "behavior_pattern_cluster",
+            "peak_hour",
+        }
+
+        for col in numeric_cols:
+            result[col] = result[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+            if col in exclude or result[col].nunique(dropna=True) <= 2:
+                continue
+
+            lower = result[col].quantile(0.01)
+            upper = result[col].quantile(0.99)
+            if pd.notna(lower) and pd.notna(upper) and lower < upper:
+                result[col] = result[col].clip(lower=lower, upper=upper)
+
+        return result
 
     @staticmethod
     def _empty_change_row(customer_id: str) -> Dict[str, Any]:

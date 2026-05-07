@@ -404,12 +404,13 @@ class UpliftModel:
         cum_treatment_count = np.maximum(cum_treatment_count, 1)
         cum_control_count = np.maximum(cum_control_count, 1)
 
-        # Uplift at each point: difference in response rates
-        # For churn: we want treatment to reduce outcome (churn)
-        # Uplift curve = cumulative difference in rates
+        # Uplift at each point: churn reduction from treatment.
+        # predict_uplift uses control_churn - treatment_churn, so AUUC must
+        # use the same sign. A negative area means the ranking targets
+        # customers harmed by treatment first.
         uplift_curve = (
-            cum_treatment_outcomes / cum_treatment_count
-            - cum_control_outcomes / cum_control_count
+            cum_control_outcomes / cum_control_count
+            - cum_treatment_outcomes / cum_treatment_count
         )
 
         # AUUC = area between model curve and random baseline
@@ -419,9 +420,115 @@ class UpliftModel:
         _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
         auuc = float(_trapz(uplift_curve, fractions))
 
-        # Return absolute value to ensure positive AUUC for a good model
-        # (sign depends on whether treatment increases or decreases outcome)
-        return abs(auuc)
+        return auuc
+
+    @staticmethod
+    def analyze_persuadables(
+        X: Union[pd.DataFrame, np.ndarray],
+        uplift_scores: Union[np.ndarray, list],
+        segments: Union[np.ndarray, list, pd.Series],
+        baseline_churn_probability: Optional[
+            Union[np.ndarray, list, pd.Series]
+        ] = None,
+        customer_ids: Optional[Sequence[str]] = None,
+        top_features: int = 10,
+    ) -> Dict[str, Union[pd.DataFrame, Dict[str, float]]]:
+        """Summarize Persuadables characteristics for targeting criteria.
+
+        Returns segment-level data that can be persisted by callers as CSV or
+        JSON. Feature lift is computed as Persuadables mean minus the rest of
+        the population, making the targeting criteria directly data-backed.
+        """
+        scores = np.asarray(uplift_scores, dtype=np.float64).ravel()
+        seg_arr = np.asarray(segments, dtype=object).ravel()
+        if len(scores) != len(seg_arr):
+            raise ValueError("uplift_scores and segments must have the same length.")
+
+        if isinstance(X, pd.DataFrame):
+            feature_df = X.reset_index(drop=True).copy()
+        else:
+            arr = np.asarray(X, dtype=np.float64)
+            feature_df = pd.DataFrame(
+                arr,
+                columns=[f"feature_{i}" for i in range(arr.shape[1])],
+            )
+        if len(feature_df) != len(scores):
+            raise ValueError("X length must match uplift_scores.")
+
+        persuadable_mask = seg_arr == "persuadable"
+        rest_mask = ~persuadable_mask
+        numeric_cols = feature_df.select_dtypes(include=[np.number]).columns.tolist()
+
+        rows = []
+        for col in numeric_cols:
+            persuadable_mean = (
+                float(feature_df.loc[persuadable_mask, col].mean())
+                if persuadable_mask.any()
+                else 0.0
+            )
+            rest_mean = (
+                float(feature_df.loc[rest_mask, col].mean())
+                if rest_mask.any()
+                else 0.0
+            )
+            rows.append({
+                "feature": col,
+                "persuadable_mean": persuadable_mean,
+                "non_persuadable_mean": rest_mean,
+                "lift": persuadable_mean - rest_mean,
+                "abs_lift": abs(persuadable_mean - rest_mean),
+            })
+
+        feature_lift = pd.DataFrame(rows)
+        if not feature_lift.empty:
+            feature_lift = feature_lift.sort_values(
+                ["abs_lift", "feature"], ascending=[False, True]
+            ).head(top_features).reset_index(drop=True)
+
+        top_customers = pd.DataFrame({
+            "customer_id": (
+                np.asarray(customer_ids)
+                if customer_ids is not None
+                else np.arange(len(scores))
+            ),
+            "uplift_score": scores,
+            "segment": seg_arr,
+        })
+        if baseline_churn_probability is not None:
+            churn = np.asarray(baseline_churn_probability, dtype=np.float64).ravel()
+            if len(churn) != len(scores):
+                raise ValueError(
+                    "baseline_churn_probability length must match scores."
+                )
+            top_customers["baseline_churn_probability"] = churn
+        top_customers = (
+            top_customers[top_customers["segment"] == "persuadable"]
+            .sort_values("uplift_score", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        summary = {
+            "total_customers": float(len(scores)),
+            "persuadable_count": float(persuadable_mask.sum()),
+            "persuadable_rate": (
+                float(persuadable_mask.mean()) if len(scores) else 0.0
+            ),
+            "persuadable_mean_uplift": (
+                float(scores[persuadable_mask].mean())
+                if persuadable_mask.any()
+                else 0.0
+            ),
+        }
+        if baseline_churn_probability is not None and not top_customers.empty:
+            summary["persuadable_mean_baseline_churn"] = float(
+                top_customers["baseline_churn_probability"].mean()
+            )
+
+        return {
+            "summary": summary,
+            "feature_lift": feature_lift,
+            "top_customers": top_customers,
+        }
 
     def save(self, path: str) -> None:
         """Save the fitted model to disk.
@@ -575,9 +682,8 @@ def plot_qini_curve(
     cum_treat_cnt = np.cumsum(t_sorted)
     cum_ctrl_cnt = np.cumsum(1 - t_sorted)
 
-    # Qini value at each rank k:
-    #   Q(k) = (treated positives up to k)
-    #          - (control positives up to k) * (treated count / control count)
+    # Qini value at each rank k for churn reduction:
+    #   Q(k) = expected control churn among treated count - treated churn.
     # Guard against zero control count.
     # Use a safe divisor (minimum 1) to avoid RuntimeWarning from division;
     # the np.where mask ensures treat_ratio is 0 when no control units exist.
@@ -587,7 +693,7 @@ def plot_qini_curve(
         cum_treat_cnt / safe_ctrl_cnt,
         0.0,
     )
-    qini_values = cum_treat_pos - cum_ctrl_pos * treat_ratio
+    qini_values = cum_ctrl_pos * treat_ratio - cum_treat_pos
 
     fractions = np.arange(1, n + 1) / n
 

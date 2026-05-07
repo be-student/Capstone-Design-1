@@ -234,14 +234,22 @@ class SurvivalModel:
     # Persistence
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_pickle_path(path: str) -> Path:
+        """Return a pickle path without appending a duplicate suffix."""
+        path_obj = Path(path)
+        if path_obj.suffix:
+            return path_obj
+        return path_obj.with_suffix(".pkl")
+
     def save(self, path: str) -> None:
         """Save the fitted survival model to disk.
 
         Args:
-            path: Base path (without extension). Saves as '{path}.pkl'.
+            path: Base path or explicit ``.pkl`` path.
         """
         self._check_fitted()
-        save_path = Path(f"{path}.pkl")
+        save_path = self._resolve_pickle_path(path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         state = {
@@ -264,12 +272,12 @@ class SurvivalModel:
         """Load a saved survival model from disk.
 
         Args:
-            path: Base path (without extension). Loads from '{path}.pkl'.
+            path: Base path or explicit ``.pkl`` path.
 
         Returns:
             A fitted SurvivalModel instance.
         """
-        load_path = Path(f"{path}.pkl")
+        load_path = cls._resolve_pickle_path(path)
         with open(load_path, "rb") as f:
             state = pickle.load(f)
 

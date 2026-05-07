@@ -369,6 +369,7 @@ class CustomerDataGenerator:
         coupon_rate = eng["coupon_usage_rate"]
         review_rate = eng["review_rate"]
         cs_monthly = eng["cs_contact_monthly"]
+        avg_session_minutes = eng["avg_session_minutes"]
         weekend_boost = eng["weekend_activity_boost"]
 
         # Decay rates
@@ -430,6 +431,9 @@ class CustomerDataGenerator:
             decayed_visit_prob = daily_visit_prob * max(
                 0.01, (1.0 - visit_decay) ** month_idx
             )
+            decayed_session_minutes = avg_session_minutes * max(
+                0.10, (1.0 - session_decay) ** month_idx
+            )
 
             # Apply weekend boost
             if current_date.weekday() >= 5:  # Saturday=5, Sunday=6
@@ -453,10 +457,23 @@ class CustomerDataGenerator:
             hour = self.rng.randint(6, 24)
             minute = self.rng.randint(0, 60)
             visit_ts = current_date.replace(hour=hour, minute=minute, second=0)
+            session_duration = self._sample_session_duration_seconds(
+                decayed_session_minutes
+            )
+            push_response = self._sample_marketing_response(
+                is_treatment,
+                response_prob=push_lift,
+                adverse_prob=adverse_prob,
+            )
 
             # page_view (every visit generates at least one)
             events.append(self._make_event(
-                customer_id, "page_view", current_date, visit_ts
+                customer_id, "page_view", current_date, visit_ts,
+                session_duration=session_duration,
+                marketing_channel=(
+                    "push_notification" if push_response is not None else None
+                ),
+                marketing_response=push_response,
             ))
 
             # search events
@@ -466,7 +483,8 @@ class CustomerDataGenerator:
             n_searches = self.rng.poisson(max(0.1, decayed_search))
             for _ in range(n_searches):
                 events.append(self._make_event(
-                    customer_id, "search", current_date, visit_ts
+                    customer_id, "search", current_date, visit_ts,
+                    session_duration=session_duration,
                 ))
 
             # add_to_cart events
@@ -476,7 +494,8 @@ class CustomerDataGenerator:
             n_cart_adds = self.rng.poisson(max(0.1, decayed_cart))
             for _ in range(n_cart_adds):
                 events.append(self._make_event(
-                    customer_id, "add_to_cart", current_date, visit_ts
+                    customer_id, "add_to_cart", current_date, visit_ts,
+                    session_duration=session_duration,
                 ))
 
             # remove_from_cart (fraction of cart adds)
@@ -484,7 +503,8 @@ class CustomerDataGenerator:
                 n_removals = self.rng.binomial(n_cart_adds, 0.25)
                 for _ in range(n_removals):
                     events.append(self._make_event(
-                        customer_id, "remove_from_cart", current_date, visit_ts
+                        customer_id, "remove_from_cart", current_date, visit_ts,
+                        session_duration=session_duration,
                     ))
 
             # purchase decision
@@ -507,6 +527,9 @@ class CustomerDataGenerator:
                     events.append(self._make_event(
                         customer_id, "purchase", current_date, visit_ts,
                         amount=amount,
+                        session_duration=session_duration,
+                        marketing_channel="coupon" if is_treatment else None,
+                        marketing_response="conversion" if is_treatment else None,
                     ))
 
                     # Review after purchase
@@ -526,18 +549,54 @@ class CustomerDataGenerator:
                             1.0, coupon_rate + coupon_lift
                         )
                     if self.rng.random() < effective_coupon_rate:
+                        coupon_response = (
+                            "conversion" if is_treatment else None
+                        )
                         events.append(self._make_event(
-                            customer_id, "coupon_use", current_date, visit_ts
+                            customer_id, "coupon_use", current_date, visit_ts,
+                            session_duration=session_duration,
+                            marketing_channel="coupon" if is_treatment else None,
+                            marketing_response=coupon_response,
                         ))
 
             # cs_contact (can also happen during a visit)
             cs_daily_prob = cs_monthly / 30.0
             if self.rng.random() < cs_daily_prob:
+                cs_response = None
+                if is_treatment and adverse_prob >= 0.08:
+                    cs_response = "adverse"
                 events.append(self._make_event(
-                    customer_id, "cs_contact", current_date, visit_ts
+                    customer_id, "cs_contact", current_date, visit_ts,
+                    session_duration=session_duration,
+                    marketing_channel="push_notification" if cs_response else None,
+                    marketing_response=cs_response,
                 ))
 
         return events
+
+    def _sample_session_duration_seconds(
+        self,
+        decayed_session_minutes: float,
+    ) -> float:
+        """Return a positive session duration after persona time decay."""
+        return float(round(max(60.0, decayed_session_minutes * 60.0), 2))
+
+    def _sample_marketing_response(
+        self,
+        is_treatment: bool,
+        response_prob: float,
+        adverse_prob: float,
+    ) -> Optional[str]:
+        """Derive treatment response metadata without perturbing event RNG."""
+        if not is_treatment:
+            return None
+        if adverse_prob >= 0.08:
+            return "adverse"
+        if response_prob >= 0.10:
+            return "conversion"
+        if response_prob > 0:
+            return "no_response"
+        return None
 
     def _make_event(
         self,
@@ -546,6 +605,9 @@ class CustomerDataGenerator:
         event_date: pd.Timestamp,
         timestamp: Optional[pd.Timestamp] = None,
         amount: Optional[float] = None,
+        session_duration: Optional[float] = None,
+        marketing_channel: Optional[str] = None,
+        marketing_response: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create an event record dictionary.
 
@@ -555,6 +617,9 @@ class CustomerDataGenerator:
             event_date: Date of the event.
             timestamp: Optional precise timestamp. If None, generated randomly.
             amount: Optional monetary amount (for purchase events).
+            session_duration: Optional session duration in seconds.
+            marketing_channel: Optional intervention channel.
+            marketing_response: Optional treatment response category.
 
         Returns:
             Event dictionary.
@@ -573,6 +638,9 @@ class CustomerDataGenerator:
             "event_date": event_date.strftime("%Y-%m-%d"),
             "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             "amount": amount,
+            "session_duration": session_duration,
+            "marketing_channel": marketing_channel,
+            "marketing_response": marketing_response,
         }
 
     # ------------------------------------------------------------------

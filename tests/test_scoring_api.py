@@ -502,3 +502,26 @@ class TestModelManagement:
 
         assert isinstance(info, dict)
         assert "model_type" in info or "version" in info
+
+    def test_loaded_classifier_uses_positive_class_probability(
+        self, scoring_api, sample_customer_features, sample_batch_features
+    ):
+        """Two-column classifier predict_proba must use churn class column."""
+
+        class TwoColumnModel:
+            model_type = "two_column_test"
+
+            def predict_proba(self, X):
+                positive = np.linspace(0.2, 0.8, len(X))
+                return np.column_stack([1.0 - positive, positive])
+
+        scoring_api.load_model(model=TwoColumnModel())
+
+        single = scoring_api.predict(sample_customer_features)
+        assert single["churn_probability"] == pytest.approx(0.2)
+
+        batch = scoring_api.predict_batch(sample_batch_features.head(3))
+        np.testing.assert_allclose(
+            batch["churn_probability"].to_numpy(),
+            np.array([0.2, 0.5, 0.8]),
+        )

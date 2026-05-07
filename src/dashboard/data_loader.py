@@ -181,6 +181,21 @@ class DashboardDataLoader:
                 return path
         return None
 
+    def _raw_events_path(self) -> Optional[Path]:
+        """Return the simulator event log path when available."""
+        raw_dir = Path(
+            (self.config.get("dashboard", {}) or {}).get(
+                "raw_data_dir", "data/raw"
+            )
+        )
+        for path in [
+            raw_dir / "events.parquet",
+            raw_dir / "events.csv",
+        ]:
+            if path.exists():
+                return path
+        return None
+
     def _load_metric_timeseries(self, metric_name: str) -> pd.DataFrame:
         """Load time-series metrics from dedicated files or MLflow exports."""
         path = self._resolve_existing_path(
@@ -927,14 +942,86 @@ class DashboardDataLoader:
             DataFrame with customer_id, event_date, revenue, segment
             suitable for CohortAnalyzer.assign_cohorts().
         """
+        artifact_name = "cohort_data"
+        empty_columns = ["customer_id", "event_date", "revenue", "segment"]
         path = self._resolve_existing_path("cohort_data.csv")
         if path is not None:
-            df = pd.read_csv(path)
-            if "event_date" in df.columns:
-                df["event_date"] = pd.to_datetime(df["event_date"])
+            try:
+                df = pd.read_csv(path)
+            except Exception as exc:
+                issue = f"Required cohort artifact {path} could not be read: {exc}."
+                self._record_artifact_issue(artifact_name, issue)
+                return self._empty_frame(empty_columns, artifact_name, issue)
+
+            required = {"customer_id", "event_date"}
+            if not required.issubset(df.columns):
+                missing = ", ".join(sorted(required - set(df.columns)))
+                issue = (
+                    f"Required cohort artifact {path} is invalid; "
+                    f"missing columns: {missing}."
+                )
+                self._record_artifact_issue(artifact_name, issue)
+                return self._empty_frame(empty_columns, artifact_name, issue)
+
+            if "revenue" not in df.columns:
+                df["revenue"] = df.get("amount", 0.0)
+            if "segment" not in df.columns:
+                df["segment"] = "all_customers"
+            df["event_date"] = pd.to_datetime(df["event_date"])
+            self._clear_artifact_issue(artifact_name)
             return df
 
-        return self._generate_sample_cohort_data()
+        raw_events = self._raw_events_path()
+        if raw_events is not None:
+            try:
+                if raw_events.suffix == ".parquet":
+                    df = pd.read_parquet(
+                        raw_events,
+                        columns=["customer_id", "event_date", "amount"],
+                    )
+                    df = df[pd.to_numeric(df["amount"], errors="coerce") > 0]
+                else:
+                    chunks = []
+                    for chunk in pd.read_csv(
+                        raw_events,
+                        usecols=["customer_id", "event_date", "amount"],
+                        chunksize=100_000,
+                    ):
+                        purchases = chunk[
+                            pd.to_numeric(chunk["amount"], errors="coerce") > 0
+                        ]
+                        if not purchases.empty:
+                            chunks.append(purchases)
+                    df = (
+                        pd.concat(chunks, ignore_index=True)
+                        if chunks
+                        else pd.DataFrame()
+                    )
+            except Exception as exc:
+                issue = (
+                    "Required raw simulator events could not be read "
+                    f"for cohort data: {exc}."
+                )
+                self._record_artifact_issue(artifact_name, issue)
+                return self._empty_frame(empty_columns, artifact_name, issue)
+
+            if df.empty:
+                issue = "Required raw simulator events contain no purchase rows for cohort data."
+                self._record_artifact_issue(artifact_name, issue)
+                return self._empty_frame(empty_columns, artifact_name, issue)
+
+            df = df.rename(columns={"amount": "revenue"})
+            df["event_date"] = pd.to_datetime(df["event_date"])
+            df["segment"] = "all_customers"
+            self._clear_artifact_issue(artifact_name)
+            return df[empty_columns]
+
+        issue = (
+            "Required artifact missing: cohort_data.csv or data/raw/events. "
+            "Cohort analysis cannot use generated samples for required dashboard evidence."
+        )
+        self._record_artifact_issue(artifact_name, issue)
+        return self._empty_frame(empty_columns, artifact_name, issue)
 
     def load_cohort_retention_matrix(self) -> pd.DataFrame:
         """Load pre-computed cohort retention matrix.
@@ -947,13 +1034,21 @@ class DashboardDataLoader:
         if path is not None:
             df = pd.read_csv(path, index_col=0)
             if df.shape[0] >= 2 and df.shape[1] >= 2:
+                self._clear_artifact_issue("cohort_retention_matrix")
                 return df
-            logger.warning("Ignoring incomplete cohort retention matrix at %s", path)
+            issue = f"Required cohort retention matrix {path} is incomplete."
+            self._record_artifact_issue("cohort_retention_matrix", issue)
+            return self._empty_frame([], "cohort_retention_matrix", issue)
 
         # Compute from cohort data using CohortAnalyzer
         cohort_data = self.load_cohort_data()
         if cohort_data.empty:
-            return pd.DataFrame()
+            issue = (
+                self.get_artifact_issue("cohort_data")
+                or "Cohort retention matrix unavailable."
+            )
+            self._record_artifact_issue("cohort_retention_matrix", issue)
+            return self._empty_frame([], "cohort_retention_matrix", issue)
 
         try:
             from src.analysis.cohort_analysis import CohortAnalyzer
@@ -961,10 +1056,13 @@ class DashboardDataLoader:
             assigned = analyzer.assign_cohorts(cohort_data, cohort_type="monthly")
             retention = analyzer.compute_retention_matrix(assigned)
             if retention.shape[0] >= 2 and retention.shape[1] >= 2:
+                self._clear_artifact_issue("cohort_retention_matrix")
                 return retention
-            return self._generate_sample_retention_matrix()
-        except Exception:
-            return self._generate_sample_retention_matrix()
+            issue = "Computed cohort retention matrix is incomplete."
+        except Exception as exc:
+            issue = f"Cohort retention matrix could not be computed: {exc}."
+        self._record_artifact_issue("cohort_retention_matrix", issue)
+        return self._empty_frame([], "cohort_retention_matrix", issue)
 
     def _generate_sample_cohort_data(self) -> pd.DataFrame:
         """Generate sample cohort event data."""
@@ -1119,13 +1217,49 @@ class DashboardDataLoader:
             Dict with experiments list, each containing name, metrics,
             and statistical test details.
         """
+        artifact_name = "ab_test_detailed"
         path = self._resolve_existing_path("ab_test_detailed.json")
         if path is not None:
-            return self._adapt_ab_detailed(self._read_json(path))
+            try:
+                detail = self._adapt_ab_detailed(self._read_json(path))
+            except Exception as exc:
+                self._record_artifact_issue(
+                    artifact_name,
+                    f"Required A/B detail artifact {path} could not be read: {exc}.",
+                )
+                return {}
+            if detail.get("experiments"):
+                self._clear_artifact_issue(artifact_name)
+                return detail
+            self._record_artifact_issue(
+                artifact_name,
+                f"Required A/B detail artifact {path} has no experiments.",
+            )
+            return {}
         path = self._resolve_existing_path("ab_test_results.json")
         if path is not None:
-            return self._adapt_ab_detailed(self._read_json(path))
-        return self._generate_sample_ab_detailed()
+            try:
+                detail = self._adapt_ab_detailed(self._read_json(path))
+            except Exception as exc:
+                self._record_artifact_issue(
+                    artifact_name,
+                    f"Required A/B result artifact {path} could not be read: {exc}.",
+                )
+                return {}
+            if detail.get("experiments"):
+                self._clear_artifact_issue(artifact_name)
+                return detail
+            self._record_artifact_issue(
+                artifact_name,
+                f"Required A/B result artifact {path} has no experiments.",
+            )
+            return {}
+        self._record_artifact_issue(
+            artifact_name,
+            "Required artifact missing: ab_test_detailed.json or ab_test_results.json. "
+            "A/B dashboard cannot use generated samples for required evidence.",
+        )
+        return {}
 
     def load_survival_curves(self) -> Dict[str, Dict[str, list]]:
         """Load Kaplan-Meier survival curves per segment.

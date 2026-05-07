@@ -414,6 +414,29 @@ class TestMissingAndOutlierHandling:
                 f"Infinite values found in feature: {col}"
             )
 
+    def test_numeric_outliers_are_clipped(
+        self, feature_engineer, sample_customers, sample_events
+    ):
+        """Extreme raw values should not pass through unsanitized."""
+        events = sample_events.copy()
+        outlier_customer = sample_customers["customer_id"].iloc[0]
+        outlier_mask = (
+            (events["customer_id"] == outlier_customer)
+            & (events["event_type"] == "purchase")
+        )
+        if not outlier_mask.any():
+            outlier_mask = events["customer_id"] == outlier_customer
+
+        events.loc[outlier_mask, "amount"] = 1e12
+        events.loc[outlier_mask, "session_duration"] = 1e9
+
+        features = feature_engineer.compute_all_features(
+            sample_customers, events, reference_date="2024-07-01"
+        )
+
+        assert features["monetary"].max() < 1e12
+        assert features["avg_session_duration"].max() < 1e9
+
 
 class TestFeatureStore:
     """Test file-based feature store save/load."""

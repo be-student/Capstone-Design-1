@@ -24,11 +24,90 @@ import pytest
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
+
+
+class _LightweightTreeModelDouble:
+    """Pickle-safe tree-model double used to avoid native booster crashes."""
+
+    def __init__(self, seed: int = 42) -> None:
+        self.estimator = LogisticRegression(
+            max_iter=500,
+            solver="liblinear",
+            random_state=seed,
+        )
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "_LightweightTreeModelDouble":
+        self.estimator.fit(X, y)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self.estimator.predict_proba(X)[:, 1]
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        probs = self.predict(X)
+        return np.column_stack([1.0 - probs, probs])
+
+    def feature_importance(self, importance_type: str = "gain") -> np.ndarray:
+        del importance_type
+        return np.abs(self.estimator.coef_[0])
+
+    @property
+    def feature_importances_(self) -> np.ndarray:
+        return self.feature_importance()
+
+
+def _lightweight_cv_auc(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_folds: int,
+    seed: int,
+    score_bias: float = 0.0,
+) -> float:
+    """Run deterministic sklearn CV in place of native LightGBM/XGBoost CV."""
+    splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    scores = []
+    for train_idx, val_idx in splitter.split(X, y):
+        model = _LightweightTreeModelDouble(seed=seed)
+        model.fit(X[train_idx], y[train_idx])
+        scores.append(roc_auc_score(y[val_idx], model.predict(X[val_idx])))
+    return float(min(1.0, np.mean(scores) + score_bias))
+
+
+@pytest.fixture
+def lightweight_ml_boosters(monkeypatch):
+    """Patch native ML boosters only where MLflow tracking is under test."""
+    from src.models.churn_model import MLChurnModel
+
+    def fake_lgb_cv(self, X, y, feature_names, params_entry):
+        del feature_names, params_entry
+        return _lightweight_cv_auc(X, y, self.n_folds, self.seed, score_bias=0.001)
+
+    def fake_xgb_cv(self, X, y, params_entry):
+        del params_entry
+        return _lightweight_cv_auc(X, y, self.n_folds, self.seed)
+
+    def fake_lgb_final(self, X, y, params_entry):
+        del params_entry
+        self._lgb_model = _LightweightTreeModelDouble(seed=self.seed).fit(X, y)
+        self.model = self._lgb_model
+
+    def fake_xgb_final(self, X, y, params_entry):
+        del params_entry
+        self._xgb_model = _LightweightTreeModelDouble(seed=self.seed).fit(X, y)
+        self.model = self._xgb_model
+
+    monkeypatch.setattr(MLChurnModel, "_cv_score_lightgbm", fake_lgb_cv)
+    monkeypatch.setattr(MLChurnModel, "_cv_score_xgboost", fake_xgb_cv)
+    monkeypatch.setattr(MLChurnModel, "_train_lightgbm_final", fake_lgb_final)
+    monkeypatch.setattr(MLChurnModel, "_train_xgboost_final", fake_xgb_final)
 
 
 # ---------------------------------------------------------------------------
@@ -867,9 +946,12 @@ class TestModelTrackerIntegration:
         sig = inspect.signature(EnsembleChurnModel.fit)
         assert "tracker" in sig.parameters
 
-    def test_ml_model_fit_with_tracker(self, mlflow_tracker, config):
+    def test_ml_model_fit_with_tracker(
+        self, mlflow_tracker, config, lightweight_ml_boosters
+    ):
         """MLChurnModel.fit() must log to tracker when provided."""
         from src.models.churn_model import MLChurnModel
+        del lightweight_ml_boosters
         np.random.seed(42)
 
         n = 500

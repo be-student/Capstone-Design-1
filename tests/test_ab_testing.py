@@ -385,6 +385,27 @@ class TestDashboardAdapters:
         assert converted["power_status"] == "underpowered"
         assert converted["is_significant"] is False
 
+    def test_harmful_effect_still_reports_statistical_significance(self, ab_test_framework):
+        raw = {
+            "name": "harmful_coupon",
+            "treatment_size": 1000,
+            "control_size": 1000,
+            "treatment_mean": 0.24,
+            "control_mean": 0.18,
+            "p_value": 0.001,
+            "is_significant": True,
+            "confidence_interval": [0.03, 0.09],
+            "power_analysis": {
+                "required_sample_size": 800,
+                "required_total_sample_size": 1600,
+                "target_power": 0.80,
+            },
+            "power": 0.91,
+        }
+        converted = ab_test_framework.to_dashboard_experiment(raw)
+        assert converted["statistically_significant"] is True
+        assert converted["is_significant"] is False
+
     def test_run_ab_test_persists_detailed_power_schema(self, tmp_path, config):
         from src import main
 

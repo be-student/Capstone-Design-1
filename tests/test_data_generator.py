@@ -236,7 +236,8 @@ class TestEventGeneration:
     def test_events_have_required_columns(self, generated_data):
         """Events DataFrame must have required columns."""
         required_cols = [
-            "customer_id", "event_type", "event_date", "timestamp"
+            "customer_id", "event_type", "event_date", "timestamp",
+            "session_duration", "marketing_channel", "marketing_response",
         ]
         df = generated_data["events"]
         for col in required_cols:
@@ -279,6 +280,18 @@ class TestEventGeneration:
         purchase_amounts = purchases["amount"]
         assert purchase_amounts.notna().all(), "Some purchases have null amounts"
         assert (purchase_amounts > 0).all(), "Some purchases have non-positive amounts"
+
+    def test_visit_events_have_positive_session_duration(self, generated_data):
+        """Visit-session events must include positive session duration."""
+        events = generated_data["events"]
+        visit_events = events[
+            events["event_type"].isin(
+                ["page_view", "search", "add_to_cart", "remove_from_cart", "purchase"]
+            )
+        ]
+        assert "session_duration" in events.columns
+        assert visit_events["session_duration"].notna().all()
+        assert (visit_events["session_duration"] > 0).all()
 
 
 class TestChurnLabeling:
@@ -388,6 +401,19 @@ class TestMarketingResponse:
         assert len(coupon_events) > 0, (
             "No coupon_use events found for treatment group"
         )
+
+    def test_marketing_response_metadata_exists(self, generated_data):
+        """Treatment events should label conversion/no-response/adverse metadata."""
+        events = generated_data["events"]
+        customers = generated_data["customers"]
+        treatment_ids = customers[
+            customers["treatment_group"] == "treatment"
+        ]["customer_id"]
+        treatment_events = events[events["customer_id"].isin(treatment_ids)]
+
+        responses = set(treatment_events["marketing_response"].dropna())
+        assert responses.issubset({"conversion", "no_response", "adverse"})
+        assert "conversion" in responses
 
     def test_differential_persona_response(self, generated_data, config):
         """Different personas should have different marketing response rates."""
@@ -523,9 +549,10 @@ class TestSingleCustomerEventGenerator:
 
     def test_single_customer_event_record_structure(self, vip_events):
         """Each event record must have customer_id, event_type, event_date,
-        timestamp, and amount fields."""
+        timestamp, amount, session, and marketing fields."""
         required_keys = {"customer_id", "event_type", "event_date",
-                         "timestamp", "amount"}
+                         "timestamp", "amount", "session_duration",
+                         "marketing_channel", "marketing_response"}
         for event in vip_events[:5]:
             assert required_keys == set(event.keys()), (
                 f"Event keys mismatch: {set(event.keys())}"
@@ -652,6 +679,40 @@ class TestSingleCustomerEventGenerator:
             f"Dormant first-half events ({first_half}) should exceed "
             f"second-half ({second_half}) due to decay"
         )
+
+    def test_session_duration_decays_over_time(
+        self, single_customer_generator, config
+    ):
+        """Session-time decay should be visible in generated session metadata."""
+        gen = single_customer_generator
+        signup = pd.Timestamp(config["simulation"]["start_date"])
+        pcfg = gen._get_persona_config("dormant")
+
+        gen.rng = np.random.RandomState(gen.seed)
+        events = gen._generate_customer_events(
+            "C_session_decay", pcfg, signup, is_treatment=False,
+        )
+        session_events = [
+            event for event in events
+            if event["event_type"] == "page_view"
+            and event["session_duration"] is not None
+        ]
+        if len(session_events) < 4:
+            pytest.skip("Too few sessions to measure session duration decay")
+
+        midpoint = signup + pd.Timedelta(days=182)
+        first_half = [
+            event["session_duration"] for event in session_events
+            if pd.Timestamp(event["event_date"]) < midpoint
+        ]
+        second_half = [
+            event["session_duration"] for event in session_events
+            if pd.Timestamp(event["event_date"]) >= midpoint
+        ]
+        if not first_half or not second_half:
+            pytest.skip("Session events do not span both halves")
+
+        assert np.median(second_half) < np.median(first_half)
 
     def test_weekend_activity_boost(self, vip_events):
         """Weekend days should show boosted activity for personas with

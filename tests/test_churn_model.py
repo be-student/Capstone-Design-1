@@ -402,6 +402,13 @@ class TestMLChurnModel:
         assert len(MLChurnModel.LGBM_PARAM_GRID) >= 2
         assert len(MLChurnModel.XGB_PARAM_GRID) >= 2
 
+    def test_imbalance_weighting_applied_in_cv_paths(self):
+        """CV/tuning folds must apply class-imbalance weighting."""
+        source = (PROJECT_ROOT / "src" / "models" / "churn_model.py").read_text()
+
+        assert '"scale_pos_weight": self._compute_scale_pos_weight(y)' in source
+        assert '**self._class_imbalance_params(y)' in source
+
 
 # ---------------------------------------------------------------------------
 # DL model tests (PyTorch)

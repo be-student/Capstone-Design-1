@@ -70,7 +70,7 @@ This system goes beyond simple churn prediction. It builds a complete retention 
 │  │       │              │             │               │            │   │
 │  │       ▼              ▼             ▼               ▼            │   │
 │  │  ┌──────────────────────────────────────────────────────┐       │   │
-│  │  │         Pipeline State (pipeline_state.json)         │       │   │
+│  │  │   Pipeline State (data/raw/pipeline_state.json)      │       │   │
 │  │  │    Checkpoint: completed / failed / pending           │       │   │
 │  │  └──────────────────────────────────────────────────────┘       │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
@@ -254,7 +254,7 @@ capstone/
 │   └── ...
 │
 ├── mlruns/                          # MLflow tracking data (SQLite + artifacts)
-├── pipeline_state.json              # Pipeline checkpoint state
+├── data/raw/pipeline_state.json     # Default pipeline checkpoint state
 ├── docker-compose.yml               # 4-container orchestration
 ├── Dockerfile.pipeline              # Pipeline container image
 ├── Dockerfile.dashboard             # Dashboard container image
@@ -443,19 +443,42 @@ Runs budget optimization and A/B test analysis:
 
 **Outputs:** Budget allocation reports, `docs/ab_test_report.md`
 
+### All Mode
+```bash
+python src/main.py --mode all
+```
+Runs the canonical 16-stage submission pipeline with checkpoint/resume support:
+`data_generation`, `preprocessing`, `feature_engineering`, `ml_model_training`,
+`dl_model_training`, `ensemble_creation`, `uplift_modeling`, `clv_prediction`,
+`customer_segmentation`, `budget_optimization`, `recommendations`,
+`cohort_analysis`, `ab_testing`, `survival_analysis`, `scoring_api_setup`,
+and `mlflow_logging`.
+
+At completion, `results/required_artifacts_checklist.json` must report
+`full_submission_ready: true`. The checklist validates full-mode simulator
+evidence, required artifact schemas, and `results/` to `data/artifacts/` mirror
+hashes.
+
 ### Pipeline Checkpointing
 
-The pipeline tracks execution state in `pipeline_state.json`:
+The pipeline tracks execution state in `data/raw/pipeline_state.json` by default:
 
 ```json
 {
-  "simulation": "completed",
-  "feature_engineering": "completed",
-  "ml_training": "completed",
-  "dl_training": "pending",
-  "uplift_modeling": "pending",
-  "optimization": "pending",
-  "timestamp": "2026-03-21T10:00:00"
+  "run_context": {
+    "small": false,
+    "data_dir": "/app/data/raw",
+    "results_dir": "/app/results",
+    "num_customers": 20000,
+    "simulation_days": 365,
+    "step_order": ["data_generation", "preprocessing", "..."]
+  },
+  "stages": {
+    "data_generation": {"status": "completed", "timestamp": "2026-05-07T16:21:36"},
+    "ml_model_training": {"status": "completed", "timestamp": "2026-05-07T16:31:00"},
+    "uplift_modeling": {"status": "pending", "timestamp": "2026-05-07T16:32:00"}
+  },
+  "seed": 42
 }
 ```
 

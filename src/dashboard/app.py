@@ -1121,6 +1121,15 @@ def render_ab_testing(st_module, config: Dict, data_loader=None):
     # Also load basic results for backward compatibility
     results = data_loader.load_ab_test_results()
 
+    if not experiments and not results:
+        _show_loader_issue(
+            st,
+            data_loader,
+            "ab_test_detailed",
+            "No A/B testing evidence available.",
+        )
+        return
+
     # -----------------------------------------------------------------
     # Summary KPI cards
     # -----------------------------------------------------------------

@@ -253,6 +253,7 @@ class TestDashboardArtifactAdapters:
         cfg["dashboard"] = {
             "artifacts_dir": str(artifacts_dir),
             "results_dir": str(results_dir),
+            "raw_data_dir": str(tmp_path / "raw"),
         }
         loader = DashboardDataLoader(cfg)
 
@@ -263,20 +264,26 @@ class TestDashboardArtifactAdapters:
         clv = loader.load_clv_data()
         metrics = loader.load_model_metrics()
         ab_results = loader.load_ab_test_results()
+        ab_detailed = loader.load_ab_test_detailed()
+        cohort_matrix = loader.load_cohort_retention_matrix()
 
         assert predictions.empty
         assert budget.empty
         assert recommendations.empty
         assert uplift.empty
         assert clv.empty
+        assert cohort_matrix.empty
         assert metrics == {}
         assert ab_results == {}
+        assert ab_detailed == {}
         issues = loader.get_artifact_issues()
         assert "churn_predictions" in issues
         assert "budget_results" in issues
         assert "recommendations" in issues
         assert "uplift_results" in issues
         assert "clv_data" in issues
+        assert "cohort_retention_matrix" in issues
+        assert "ab_test_detailed" in issues
 
     def test_invalid_required_prediction_artifact_returns_visible_empty_state(
         self, tmp_path, config
@@ -314,6 +321,7 @@ class TestDashboardArtifactAdapters:
         cfg["dashboard"] = {
             "results_dir": str(results_dir),
             "artifacts_dir": str(artifacts_dir),
+            "raw_data_dir": str(tmp_path / "raw"),
         }
         loader = DashboardDataLoader(cfg)
         drift = loader.load_drift_history()
@@ -323,6 +331,33 @@ class TestDashboardArtifactAdapters:
         issue = loader.get_artifact_issue("monitoring_report")
         assert "monitoring_report.json" in issue
         assert "cannot use generated samples" in issue
+
+    def test_missing_required_cohort_and_ab_artifacts_do_not_use_samples(
+        self, tmp_path, config
+    ):
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        artifacts_dir = tmp_path / "artifacts"
+        results_dir.mkdir()
+        artifacts_dir.mkdir()
+
+        cfg = dict(config)
+        cfg["dashboard"] = {
+            "results_dir": str(results_dir),
+            "artifacts_dir": str(artifacts_dir),
+            "raw_data_dir": str(tmp_path / "raw"),
+        }
+        loader = DashboardDataLoader(cfg)
+
+        assert loader.load_cohort_retention_matrix().empty
+        assert loader.load_ab_test_detailed() == {}
+
+        issues = loader.get_artifact_issues()
+        assert "cohort_retention_matrix" in issues
+        assert "cannot use generated samples" in issues["cohort_retention_matrix"]
+        assert "ab_test_detailed" in issues
+        assert "cannot use generated samples" in issues["ab_test_detailed"]
 
     def test_invalid_clv_artifact_is_not_zero_filled_in_predictions(
         self, tmp_path, config

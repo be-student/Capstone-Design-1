@@ -674,7 +674,7 @@ class ABTestFramework:
             "lift": float(lift),
             "p_value": float(result.get("p_value", 1.0)),
             "is_significant": bool(passes_power_gate),
-            "statistically_significant": bool(beneficial_significant),
+            "statistically_significant": bool(statistically_significant),
             "confidence_interval": [float(ci[0]), float(ci[1])],
             "effect_size_cohens_h": float(abs(effect_size)),
             "power": observed_power,

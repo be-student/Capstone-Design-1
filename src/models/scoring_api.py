@@ -279,7 +279,7 @@ class ScoringAPI:
         df = pd.DataFrame([vals], columns=feature_cols)
         prob = self._model.predict_proba(df)
         if isinstance(prob, np.ndarray):
-            return float(prob[0]) if prob.ndim == 1 else float(prob[0, 0])
+            return float(prob[0]) if prob.ndim == 1 else float(prob[0, -1])
         return float(prob)
 
     def _batch_score_with_model(self, data: pd.DataFrame) -> np.ndarray:
@@ -288,7 +288,7 @@ class ScoringAPI:
         X = data[feature_cols].fillna(0.0).copy()
         probs = self._model.predict_proba(X)
         if probs.ndim > 1:
-            probs = probs[:, 0]
+            probs = probs[:, -1]
         return probs
 
     def _heuristic_score(self, features: Dict[str, Any]) -> float:

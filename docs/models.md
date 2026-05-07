@@ -970,27 +970,31 @@ Run Name: cox_ph_{timestamp}
 
 ### Pipeline Checkpoint System
 
-State is persisted to `pipeline_state.json`:
+State is persisted to the active data directory, `data/raw/pipeline_state.json`
+for the default local and Docker runs:
 
 ```json
 {
-  "pipeline_id": "run_20240101_120000",
-  "status": "completed",
-  "steps": {
-    "data_generation": {"status": "completed", "duration_sec": 45},
-    "feature_engineering": {"status": "completed", "duration_sec": 120},
-    "ml_training": {"status": "completed", "duration_sec": 300},
-    "dl_training": {"status": "completed", "duration_sec": 600},
-    "ensemble": {"status": "completed", "duration_sec": 10},
-    "clv_prediction": {"status": "completed", "duration_sec": 60},
-    "monitoring": {"status": "completed", "duration_sec": 30}
+  "run_context": {
+    "small": false,
+    "data_dir": "/app/data/raw",
+    "results_dir": "/app/results",
+    "num_customers": 20000,
+    "simulation_days": 365,
+    "step_order": ["data_generation", "preprocessing", "..."]
   },
-  "timestamp": "2024-01-01T12:00:00",
-  "random_seed": 42
+  "stages": {
+    "data_generation": {"status": "completed", "metadata": {"duration_seconds": 45.2}},
+    "ml_model_training": {"status": "completed", "metadata": {"duration_seconds": 300.4}},
+    "uplift_modeling": {"status": "pending", "metadata": {}}
+  },
+  "seed": 42
 }
 ```
 
-Each step can have status: `pending`, `running`, `completed`, or `failed`. On restart, the pipeline resumes from the last non-completed step.
+Each stage can have status: `pending`, `completed`, or `failed`. On restart,
+the runner skips completed stages and resumes from the first non-completed
+canonical stage.
 
 ---
 

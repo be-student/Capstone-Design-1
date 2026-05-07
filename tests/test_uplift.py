@@ -177,6 +177,33 @@ class TestSegmentationEdgeCases:
         ).iloc[0]
         assert auto_model.learner == best["learner"]
 
+    def test_persuadables_analysis_returns_targeting_data(self, config):
+        """Persuadables analysis should produce data-backed targeting inputs."""
+        model = UpliftModel(config)
+        X = pd.DataFrame({
+            "recency": [90.0, 80.0, 10.0, 5.0],
+            "frequency": [1.0, 2.0, 8.0, 9.0],
+            "monetary": [100.0, 200.0, 900.0, 1000.0],
+        })
+        scores = np.array([0.30, 0.20, 0.01, -0.10])
+        segments = np.array([
+            "persuadable", "persuadable", "sure_thing", "sleeping_dog"
+        ])
+        churn = np.array([0.8, 0.7, 0.2, 0.6])
+
+        analysis = model.analyze_persuadables(
+            X,
+            uplift_scores=scores,
+            segments=segments,
+            baseline_churn_probability=churn,
+            customer_ids=["C1", "C2", "C3", "C4"],
+            top_features=2,
+        )
+
+        assert analysis["summary"]["persuadable_count"] == 2.0
+        assert len(analysis["feature_lift"]) == 2
+        assert list(analysis["top_customers"]["customer_id"]) == ["C1", "C2"]
+
 
 # ---------------------------------------------------------------------------
 # AUUC edge cases

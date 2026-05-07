@@ -241,6 +241,20 @@ class TestRenderFunctionsSmokeTest:
         mock_st.warning.assert_called_once()
         mock_st.plotly_chart.assert_not_called()
 
+    def test_render_ab_testing_empty_loader_issue_warns(self, mock_st, config):
+        """Missing A/B evidence should render a visible empty state."""
+        from src.dashboard.app import render_ab_testing
+
+        loader = MagicMock()
+        loader.load_ab_test_detailed.return_value = {}
+        loader.load_ab_test_results.return_value = {}
+        loader.get_artifact_issue.return_value = "Required A/B artifact missing."
+
+        render_ab_testing(mock_st, config, loader)
+
+        mock_st.warning.assert_called_once()
+        mock_st.plotly_chart.assert_not_called()
+
     def test_render_uplift_runs(self, mock_st, config, data_loader):
         """render_uplift should run without raising exceptions."""
         from src.dashboard.app import render_uplift

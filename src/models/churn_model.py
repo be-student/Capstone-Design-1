@@ -128,6 +128,13 @@ class MLChurnModel:
         self._xgb_model = None  # stored for feature importance
         self._lgb_model = None
 
+    def _class_imbalance_params(self, y: np.ndarray) -> Dict[str, float]:
+        """Return explicit positive-class weighting when churn is imbalanced."""
+        pos_rate = float(np.mean(np.asarray(y) == 1))
+        if pos_rate >= 0.30:
+            return {}
+        return {"scale_pos_weight": self._compute_scale_pos_weight(y)}
+
     def _cv_score_lightgbm(
         self, X: np.ndarray, y: np.ndarray,
         feature_names: List[str], params_entry: Dict[str, Any],
@@ -153,6 +160,7 @@ class MLChurnModel:
             "seed": self.seed,
             "deterministic": True,
             "bagging_freq": 5,
+            **self._class_imbalance_params(y),
             **params_entry,
         }
 
@@ -223,6 +231,7 @@ class MLChurnModel:
                 random_state=self.seed,
                 verbosity=0,
                 early_stopping_rounds=20,
+                scale_pos_weight=self._compute_scale_pos_weight(y),
                 **params_entry,
             )
             model.fit(
@@ -377,12 +386,12 @@ class MLChurnModel:
         num_boost_round = params_entry.get("num_boost_round", 200)
         p = {k: v for k, v in params_entry.items() if k != "num_boost_round"}
 
-        # Handle class imbalance: use is_unbalance when positive rate < 30%
+        # Handle class imbalance with the same weighting strategy used in CV.
         pos_rate = float(np.mean(y == 1))
-        is_unbalance = pos_rate < 0.30
+        imbalance_params = self._class_imbalance_params(y)
         logger.info(
-            "LightGBM final train: pos_rate=%.4f, is_unbalance=%s",
-            pos_rate, is_unbalance,
+            "LightGBM final train: pos_rate=%.4f, imbalance_params=%s",
+            pos_rate, imbalance_params,
         )
 
         params = {
@@ -392,7 +401,7 @@ class MLChurnModel:
             "seed": self.seed,
             "deterministic": True,
             "bagging_freq": 5,
-            "is_unbalance": is_unbalance,
+            **imbalance_params,
             **p,
         }
 
