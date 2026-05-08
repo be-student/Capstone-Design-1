@@ -361,6 +361,21 @@ class TestParameterLogging:
 
         mlflow_tracker.end_run()
 
+    def test_log_params_serializes_repo_paths_relative(self, mlflow_tracker):
+        """Repo-local path params must not persist machine absolute paths."""
+        mlflow_tracker.create_experiment(name="path_param_test")
+        run_id = mlflow_tracker.start_run(run_name="path_param_run")
+
+        mlflow_tracker.log_params({
+            "models_dir": str(PROJECT_ROOT / "models"),
+            "results_dir": str(PROJECT_ROOT / "results"),
+        })
+
+        mlflow_tracker.end_run()
+        run = mlflow_tracker.client.get_run(run_id)
+        assert run.data.params["models_dir"] == "models"
+        assert run.data.params["results_dir"] == "results"
+
     def test_log_ensemble_weights(self, mlflow_tracker, config):
         """Must log ensemble weights from pipeline config."""
         mlflow_tracker.create_experiment(name="ensemble_weight_test")
@@ -470,6 +485,40 @@ class TestArtifactLogging:
         )
 
         mlflow_tracker.end_run()
+
+    def test_log_artifact_scrubs_local_paths(self, mlflow_tracker, tmp_path):
+        """Text evidence artifacts must not persist local absolute paths."""
+        mlflow_tracker.create_experiment(name="scrubbed_artifact_test")
+        run_id = mlflow_tracker.start_run(run_name="scrubbed_artifact_run")
+
+        evidence = tmp_path / "required_artifacts_checklist.json"
+        evidence.write_text(
+            json.dumps({
+                "repo_path": str(PROJECT_ROOT / "results" / "model_metrics.json"),
+                "tmp_path": str(tmp_path / "results" / "model_metrics.json"),
+            }),
+            encoding="utf-8",
+        )
+        mlflow_tracker.log_artifact(
+            local_path=str(evidence),
+            artifact_path="evidence",
+        )
+
+        mlflow_tracker.end_run()
+        logged_path = mlflow_tracker.client.download_artifacts(
+            run_id,
+            "evidence/required_artifacts_checklist.json",
+        )
+        logged_text = Path(logged_path).read_text(encoding="utf-8")
+        assert "results/model_metrics.json" in logged_text
+        blocked_markers = ["Users", "private"]
+        local_user = os.environ.get("USER") or os.environ.get("LOGNAME")
+        if local_user:
+            blocked_markers.append(local_user)
+        assert all(
+            marker not in logged_text
+            for marker in blocked_markers
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,44 @@ from torch.utils.data import DataLoader, TensorDataset
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _serialize_model_artifact_path(path: Union[str, Path], manifest_path: Path) -> str:
+    """Serialize model evidence paths without local absolute prefixes."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+
+    resolved = candidate.resolve(strict=False)
+    for base in (PROJECT_ROOT, manifest_path.parent):
+        try:
+            return resolved.relative_to(base.resolve(strict=False)).as_posix()
+        except ValueError:
+            continue
+    return candidate.name
+
+
+def _normalize_model_artifact_record(
+    record: Dict[str, Any],
+    manifest_path: Path,
+) -> Dict[str, Any]:
+    """Normalize legacy manifest records that may contain absolute paths."""
+    normalized = dict(record)
+    for path_key, filename_key in (
+        ("primary_path", "primary_filename"),
+        ("versioned_path", "versioned_filename"),
+    ):
+        value = normalized.get(path_key)
+        if not value and normalized.get(filename_key):
+            value = manifest_path.parent / str(normalized[filename_key])
+        if value:
+            normalized[path_key] = _serialize_model_artifact_path(
+                value,
+                manifest_path,
+            )
+    return normalized
+
 
 def _model_artifact_version(config: Dict[str, Any]) -> str:
     """Resolve a filesystem-safe model artifact version."""
@@ -77,14 +115,23 @@ def _write_model_artifact_manifest(
     else:
         manifest = {}
 
-    records = list(manifest.get("artifacts", []))
+    records = [
+        _normalize_model_artifact_record(existing, manifest_path)
+        for existing in list(manifest.get("artifacts", []))
+    ]
     record = {
         "model_kind": model_kind,
         "version": _model_artifact_version(metadata.get("config", {})),
         "primary_filename": primary_path.name,
         "versioned_filename": versioned_path.name,
-        "primary_path": str(primary_path),
-        "versioned_path": str(versioned_path),
+        "primary_path": _serialize_model_artifact_path(
+            primary_path,
+            manifest_path,
+        ),
+        "versioned_path": _serialize_model_artifact_path(
+            versioned_path,
+            manifest_path,
+        ),
         "metadata": {
             key: value
             for key, value in metadata.items()

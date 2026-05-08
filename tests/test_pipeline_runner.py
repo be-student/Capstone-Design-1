@@ -347,7 +347,7 @@ class TestPipelineArtifactValidation:
         assert result["valid"] is False
         assert result["reason"] == "mirror_hash_mismatch"
 
-    def test_required_checklist_does_not_hide_stale_mirror_hash(
+    def test_required_checklist_refreshes_stale_mirror_before_hashing(
         self, tmp_path, monkeypatch
     ):
         results_dir = tmp_path / "results"
@@ -384,12 +384,12 @@ class TestPipelineArtifactValidation:
         )
 
         row = checklist["artifacts"][0]
-        assert row["mirror_hash_match"] is False
-        assert row["satisfied"] is False
-        assert checklist["full_submission_ready"] is False
+        assert row["mirror_hash_match"] is True
+        assert row["satisfied"] is True
+        assert checklist["full_submission_ready"] is True
         assert pd.read_csv(artifacts_dir / "recommendations.csv")[
             "customer_id"
-        ].tolist() == ["stale"]
+        ].tolist() == ["C1", "C2"]
 
     def test_run_all_fails_when_checklist_not_full_ready_even_without_missing(
         self, tmp_path, monkeypatch

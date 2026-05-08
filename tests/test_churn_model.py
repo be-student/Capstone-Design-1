@@ -416,6 +416,14 @@ class TestMLChurnModel:
             row["versioned_filename"] == "ml_churn_model_v1.pkl.joblib"
             for row in manifest["artifacts"]
         )
+        record = next(
+            row for row in manifest["artifacts"]
+            if row["versioned_filename"] == "ml_churn_model_v1.pkl.joblib"
+        )
+        assert record["primary_path"] == "ml_churn_model.pkl.joblib"
+        assert record["versioned_path"] == "ml_churn_model_v1.pkl.joblib"
+        assert not Path(record["primary_path"]).is_absolute()
+        assert not Path(record["versioned_path"]).is_absolute()
 
     def test_ml_model_hyperparam_grid_exists(self, ml_model):
         """ML model must have parameter grids for both XGBoost and LightGBM."""
@@ -546,6 +554,14 @@ class TestDLChurnModel:
             row["versioned_filename"] == "dl_churn_model_v1.pt"
             for row in manifest["artifacts"]
         )
+        record = next(
+            row for row in manifest["artifacts"]
+            if row["versioned_filename"] == "dl_churn_model_v1.pt"
+        )
+        assert record["primary_path"] == "dl_churn_model.pt"
+        assert record["versioned_path"] == "dl_churn_model_v1.pt"
+        assert not Path(record["primary_path"]).is_absolute()
+        assert not Path(record["versioned_path"]).is_absolute()
 
 
 # ---------------------------------------------------------------------------

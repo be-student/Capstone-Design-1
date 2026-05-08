@@ -2537,7 +2537,7 @@ class TestBudgetOptimizationDisplayDetails:
 
     def test_whatif_scenario_structure(self, config):
         """What-if scenarios have expected structure."""
-        from src.dashboard.app import _build_whatif_scenarios
+        from src.dashboard.calculations import _build_whatif_scenarios
         scenarios = _build_whatif_scenarios(
             default_budget=50_000_000,
             current_budget=50_000_000,
@@ -2553,7 +2553,7 @@ class TestBudgetOptimizationDisplayDetails:
 
     def test_scenario_comparison_df(self, sample_budget_results, config):
         """Scenario comparison produces valid DataFrame."""
-        from src.dashboard.app import (
+        from src.dashboard.calculations import (
             _build_whatif_scenarios,
             _compute_scenario_comparison,
         )
@@ -2577,7 +2577,7 @@ class TestBudgetOptimizationDisplayDetails:
 
     def test_budget_sweep_analysis(self, sample_budget_results):
         """Budget sweep produces valid sweep analysis data."""
-        from src.dashboard.app import _compute_budget_sweep
+        from src.dashboard.calculations import _compute_budget_sweep
         baseline_total = sample_budget_results["allocated_budget_krw"].sum()
         sweep = _compute_budget_sweep(
             budget_results=sample_budget_results,
@@ -2715,7 +2715,7 @@ class TestPowerAnalysisCalculator:
 
     def test_compute_power_analysis_returns_required_keys(self):
         """Power analysis returns sample_size_per_group, total, duration."""
-        from src.dashboard.app import _compute_power_analysis
+        from src.dashboard.calculations import _compute_power_analysis
         result = _compute_power_analysis(
             baseline_rate=0.20, mde=0.05, alpha=0.05, power=0.80,
         )
@@ -2725,7 +2725,7 @@ class TestPowerAnalysisCalculator:
 
     def test_sample_size_positive(self):
         """Sample size must be positive integer."""
-        from src.dashboard.app import _compute_power_analysis
+        from src.dashboard.calculations import _compute_power_analysis
         result = _compute_power_analysis(
             baseline_rate=0.20, mde=0.05, alpha=0.05, power=0.80,
         )
@@ -2734,28 +2734,28 @@ class TestPowerAnalysisCalculator:
 
     def test_larger_mde_needs_fewer_samples(self):
         """Larger MDE requires fewer samples."""
-        from src.dashboard.app import _compute_power_analysis
+        from src.dashboard.calculations import _compute_power_analysis
         r1 = _compute_power_analysis(baseline_rate=0.20, mde=0.02)
         r2 = _compute_power_analysis(baseline_rate=0.20, mde=0.10)
         assert r1["sample_size_per_group"] > r2["sample_size_per_group"]
 
     def test_higher_power_needs_more_samples(self):
         """Higher power requires more samples."""
-        from src.dashboard.app import _compute_power_analysis
+        from src.dashboard.calculations import _compute_power_analysis
         r1 = _compute_power_analysis(baseline_rate=0.20, mde=0.05, power=0.80)
         r2 = _compute_power_analysis(baseline_rate=0.20, mde=0.05, power=0.95)
         assert r2["sample_size_per_group"] > r1["sample_size_per_group"]
 
     def test_stricter_alpha_needs_more_samples(self):
         """Stricter alpha requires more samples."""
-        from src.dashboard.app import _compute_power_analysis
+        from src.dashboard.calculations import _compute_power_analysis
         r1 = _compute_power_analysis(baseline_rate=0.20, mde=0.05, alpha=0.10)
         r2 = _compute_power_analysis(baseline_rate=0.20, mde=0.05, alpha=0.01)
         assert r2["sample_size_per_group"] > r1["sample_size_per_group"]
 
     def test_estimated_duration_days(self):
         """Duration is total participants / daily enrollment."""
-        from src.dashboard.app import _compute_power_analysis
+        from src.dashboard.calculations import _compute_power_analysis
         result = _compute_power_analysis(
             baseline_rate=0.20, mde=0.05, daily_enrollment=200,
         )
@@ -2766,7 +2766,7 @@ class TestPowerAnalysisCalculator:
 
     def test_power_curve_shape(self):
         """Power curve should be monotonically non-decreasing."""
-        from src.dashboard.app import _compute_power_curve
+        from src.dashboard.calculations import _compute_power_curve
         df = _compute_power_curve(
             baseline_rate=0.20, mde=0.05, alpha=0.05, max_n=5000,
         )
@@ -2779,7 +2779,7 @@ class TestPowerAnalysisCalculator:
 
     def test_power_curve_bounded(self):
         """Power values should be between 0 and 1."""
-        from src.dashboard.app import _compute_power_curve
+        from src.dashboard.calculations import _compute_power_curve
         df = _compute_power_curve(
             baseline_rate=0.20, mde=0.05, alpha=0.05, max_n=3000,
         )
@@ -2788,7 +2788,7 @@ class TestPowerAnalysisCalculator:
 
     def test_mde_sensitivity_table(self):
         """MDE sensitivity produces valid table."""
-        from src.dashboard.app import _compute_mde_sensitivity
+        from src.dashboard.calculations import _compute_mde_sensitivity
         df = _compute_mde_sensitivity(
             baseline_rate=0.20, alpha=0.05, power=0.80,
         )
@@ -2805,7 +2805,7 @@ class TestPowerAnalysisCalculator:
 
     def test_mde_sensitivity_excludes_impossible(self):
         """MDE values >= baseline_rate should be excluded."""
-        from src.dashboard.app import _compute_mde_sensitivity
+        from src.dashboard.calculations import _compute_mde_sensitivity
         df = _compute_mde_sensitivity(
             baseline_rate=0.10, alpha=0.05, power=0.80,
         )
@@ -2821,7 +2821,7 @@ class TestMultipleComparisonCorrections:
 
     def test_correction_returns_all_methods(self):
         """Returns Bonferroni, Holm, and BH corrections."""
-        from src.dashboard.app import _compute_multiple_comparison_corrections
+        from src.dashboard.calculations import _compute_multiple_comparison_corrections
         df = _compute_multiple_comparison_corrections(
             p_values=[0.01, 0.04, 0.08],
             experiment_names=["A", "B", "C"],
@@ -2834,7 +2834,7 @@ class TestMultipleComparisonCorrections:
 
     def test_bonferroni_is_conservative(self):
         """Bonferroni p-values >= raw p-values."""
-        from src.dashboard.app import _compute_multiple_comparison_corrections
+        from src.dashboard.calculations import _compute_multiple_comparison_corrections
         df = _compute_multiple_comparison_corrections(
             p_values=[0.01, 0.04, 0.08],
             experiment_names=["A", "B", "C"],
@@ -2844,7 +2844,7 @@ class TestMultipleComparisonCorrections:
 
     def test_corrected_p_values_bounded(self):
         """Corrected p-values should be between 0 and 1."""
-        from src.dashboard.app import _compute_multiple_comparison_corrections
+        from src.dashboard.calculations import _compute_multiple_comparison_corrections
         df = _compute_multiple_comparison_corrections(
             p_values=[0.001, 0.02, 0.5],
             experiment_names=["A", "B", "C"],
@@ -2855,7 +2855,7 @@ class TestMultipleComparisonCorrections:
 
     def test_significance_decision_columns(self):
         """Significance decision columns are present."""
-        from src.dashboard.app import _compute_multiple_comparison_corrections
+        from src.dashboard.calculations import _compute_multiple_comparison_corrections
         df = _compute_multiple_comparison_corrections(
             p_values=[0.001, 0.04, 0.5],
             experiment_names=["A", "B", "C"],
@@ -2868,7 +2868,7 @@ class TestMultipleComparisonCorrections:
 
     def test_bonferroni_with_single_test(self):
         """Single test Bonferroni should equal raw p-value."""
-        from src.dashboard.app import _compute_multiple_comparison_corrections
+        from src.dashboard.calculations import _compute_multiple_comparison_corrections
         df = _compute_multiple_comparison_corrections(
             p_values=[0.03],
             experiment_names=["A"],
@@ -2912,7 +2912,7 @@ class TestMultiChannelBudgetAllocation:
         self, sample_budget_results, channel_config,
     ):
         """Each configured channel appears in allocation data."""
-        from src.dashboard.app import _build_channel_allocation_data
+        from src.dashboard.calculations import _build_channel_allocation_data
         df = _build_channel_allocation_data(
             budget_results=sample_budget_results,
             channel_config=channel_config,
@@ -2924,7 +2924,7 @@ class TestMultiChannelBudgetAllocation:
         self, sample_budget_results, channel_config,
     ):
         """Channel data has required columns."""
-        from src.dashboard.app import _build_channel_allocation_data
+        from src.dashboard.calculations import _build_channel_allocation_data
         df = _build_channel_allocation_data(
             budget_results=sample_budget_results,
             channel_config=channel_config,
@@ -2941,7 +2941,7 @@ class TestMultiChannelBudgetAllocation:
         self, sample_budget_results, channel_config,
     ):
         """Channel allocations sum approximately to total budget."""
-        from src.dashboard.app import _build_channel_allocation_data
+        from src.dashboard.calculations import _build_channel_allocation_data
         total_budget = 50_000_000
         df = _build_channel_allocation_data(
             budget_results=sample_budget_results,
@@ -2956,7 +2956,7 @@ class TestMultiChannelBudgetAllocation:
         self, sample_budget_results, channel_config,
     ):
         """Expected actions = allocated_budget / cost_per_action."""
-        from src.dashboard.app import _build_channel_allocation_data
+        from src.dashboard.calculations import _build_channel_allocation_data
         df = _build_channel_allocation_data(
             budget_results=sample_budget_results,
             channel_config=channel_config,
@@ -2970,7 +2970,7 @@ class TestMultiChannelBudgetAllocation:
         self, sample_budget_results, channel_config,
     ):
         """Higher ROI channels get proportionally more budget."""
-        from src.dashboard.app import _build_channel_allocation_data
+        from src.dashboard.calculations import _build_channel_allocation_data
         df = _build_channel_allocation_data(
             budget_results=sample_budget_results,
             channel_config=channel_config,
@@ -2987,7 +2987,7 @@ class TestMultiChannelBudgetAllocation:
         self, sample_budget_results, channel_config,
     ):
         """Allocations scale with total budget."""
-        from src.dashboard.app import _build_channel_allocation_data
+        from src.dashboard.calculations import _build_channel_allocation_data
         df1 = _build_channel_allocation_data(
             budget_results=sample_budget_results,
             channel_config=channel_config,

@@ -49,7 +49,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.pipeline.artifact_validation import validate_cohort_artifacts  # noqa: E402
+from src.pipeline.artifact_validation import (  # noqa: E402
+    sync_and_validate_artifacts,
+    validate_cohort_artifacts,
+)
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "simulator_config.yaml"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 DEFAULT_RESULTS_DIR = PROJECT_ROOT / "results"
@@ -244,9 +247,15 @@ def _write_artifact_checklist(
     results_dir: Path,
     data_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Record whether every required submission artifact exists."""
+    """Record required artifact readiness after refreshing dashboard mirrors."""
     artifact_dir = _dashboard_artifacts_dir(config)
     data_dir = data_dir or DEFAULT_DATA_DIR
+    sync_and_validate_artifacts(
+        results_dir,
+        artifact_dir,
+        REQUIRED_PIPELINE_ARTIFACTS,
+        strict=False,
+    )
     rows = []
     for name in REQUIRED_PIPELINE_ARTIFACTS:
         results_path = results_dir / name

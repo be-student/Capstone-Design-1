@@ -14,14 +14,94 @@ All configurable parameters are read from the YAML config dictionary.
 
 import logging
 import os
+import re
 import tempfile
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, Optional
+from pathlib import Path
+from typing import Any, Dict, Generator, Optional, Tuple
 
 import mlflow
 from mlflow.tracking import MlflowClient
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_ROOT_NAMES = ("Users", "home", "private")
+TEXT_ARTIFACT_SUFFIXES = {
+    ".csv",
+    ".json",
+    ".md",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+TEXT_ARTIFACT_NAMES = {
+    "meta.yaml",
+    "mlflow.user",
+    "models_dir",
+    "results_dir",
+}
+
+
+def _is_local_absolute_path(value: str) -> bool:
+    """Return True for common workstation absolute path forms."""
+    parts = Path(value).parts
+    return len(parts) > 1 and parts[0] == os.sep and parts[1] in LOCAL_ROOT_NAMES
+
+
+def _collapse_absolute_path(value: str) -> str:
+    """Collapse local absolute paths to evidence-safe relative paths."""
+    path = Path(value)
+    parts = path.parts
+    for marker in ("models", "results", "data", "mlruns", "docs", "src", "tests"):
+        if marker in parts:
+            return Path(*parts[parts.index(marker):]).as_posix()
+    return path.name
+
+
+def _sanitize_text_evidence(text: str) -> str:
+    """Remove machine-local absolute paths and usernames from text evidence."""
+    root = PROJECT_ROOT.resolve(strict=False).as_posix()
+    sanitized = text.replace(f"file://{root}/", "")
+    sanitized = sanitized.replace(f"file://{root}", ".")
+    sanitized = sanitized.replace(f"{root}/", "")
+    sanitized = sanitized.replace(root, ".")
+
+    local_user = os.environ.get("USER") or os.environ.get("LOGNAME")
+    if local_user:
+        sanitized = sanitized.replace(local_user, "local-user")
+    local_path_pattern = re.compile(
+        r"(?:file://)?/(?:"
+        + "|".join(re.escape(name) for name in LOCAL_ROOT_NAMES)
+        + r")/[^\s\"',}]+"
+    )
+    sanitized = local_path_pattern.sub(
+        lambda match: _collapse_absolute_path(
+            match.group(0).removeprefix("file://")
+        ),
+        sanitized,
+    )
+    return sanitized
+
+
+def _sanitize_mlflow_value(value: Any) -> Any:
+    """Sanitize MLflow params/tags without changing numeric values."""
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    if not isinstance(value, str):
+        return value
+
+    sanitized = _sanitize_text_evidence(value)
+    if sanitized != value:
+        return sanitized
+
+    if _is_local_absolute_path(value):
+        return _collapse_absolute_path(value)
+    if value.startswith("file://"):
+        file_path = value[len("file://"):]
+        if _is_local_absolute_path(file_path):
+            return _collapse_absolute_path(file_path)
+    return sanitized
 
 
 class MLflowTracker:
@@ -112,6 +192,7 @@ class MLflowTracker:
                 exp_id = self.client.create_experiment(name)
         self._current_experiment_name = name
         mlflow.set_experiment(name)
+        self._scrub_local_file_store_evidence()
         return str(exp_id)
 
     def set_experiment(self, name: str) -> None:
@@ -135,6 +216,7 @@ class MLflowTracker:
             mlflow.end_run()
 
         self._active_run = mlflow.start_run(run_name=run_name)
+        mlflow.set_tag("mlflow.user", "local-user")
         return self._active_run.info.run_id
 
     def end_run(self) -> None:
@@ -142,6 +224,7 @@ class MLflowTracker:
         if self._active_run is not None:
             mlflow.end_run()
             self._active_run = None
+            self._scrub_local_file_store_evidence()
 
     def log_params(self, params: Dict[str, Any]) -> None:
         """Log parameters to the active run.
@@ -150,7 +233,7 @@ class MLflowTracker:
             params: Dictionary of parameter name-value pairs.
         """
         for key, value in params.items():
-            mlflow.log_param(key, value)
+            mlflow.log_param(key, _sanitize_mlflow_value(value))
 
     def log_metrics(
         self, metrics: Dict[str, float], step: Optional[int] = None
@@ -175,7 +258,12 @@ class MLflowTracker:
             local_path: Local filesystem path to the artifact.
             artifact_path: Optional subdirectory in the artifact store.
         """
-        mlflow.log_artifact(local_path, artifact_path=artifact_path)
+        safe_path, tmp_ctx = self._prepare_text_artifact_for_logging(local_path)
+        try:
+            mlflow.log_artifact(safe_path, artifact_path=artifact_path)
+        finally:
+            if tmp_ctx is not None:
+                tmp_ctx.cleanup()
 
     def log_model(
         self,
@@ -197,7 +285,56 @@ class MLflowTracker:
             tags: Dictionary of tag name-value pairs.
         """
         for key, value in tags.items():
-            mlflow.set_tag(key, value)
+            mlflow.set_tag(key, _sanitize_mlflow_value(value))
+
+    def _prepare_text_artifact_for_logging(
+        self,
+        local_path: str,
+    ) -> Tuple[str, Optional[tempfile.TemporaryDirectory]]:
+        """Return a sanitized temp artifact path when text evidence needs it."""
+        source = Path(local_path)
+        if (
+            not source.is_file()
+            or (
+                source.suffix.lower() not in TEXT_ARTIFACT_SUFFIXES
+                and source.name not in TEXT_ARTIFACT_NAMES
+            )
+        ):
+            return local_path, None
+        try:
+            if source.stat().st_size > 5_000_000:
+                return local_path, None
+            original = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return local_path, None
+
+        sanitized = _sanitize_text_evidence(original)
+        if sanitized == original:
+            return local_path, None
+
+        tmp_ctx = tempfile.TemporaryDirectory()
+        target = Path(tmp_ctx.name) / source.name
+        target.write_text(sanitized, encoding="utf-8")
+        return str(target), tmp_ctx
+
+    def _scrub_local_file_store_evidence(self) -> None:
+        """Best-effort scrub of repo-tracked local MLflow text evidence."""
+        mlruns_dir = PROJECT_ROOT / "mlruns"
+        if not mlruns_dir.exists():
+            return
+
+        for path in mlruns_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > 5_000_000:
+                    continue
+                original = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            sanitized = _sanitize_text_evidence(original)
+            if sanitized != original:
+                path.write_text(sanitized, encoding="utf-8")
 
     def get_best_run(
         self,
