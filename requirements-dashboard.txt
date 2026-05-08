@@ -1,0 +1,25 @@
+# =============================================================================
+# Streamlit Dashboard Runtime Dependencies
+# =============================================================================
+# Keep this image focused on dashboard rendering and health/status pages.
+# Full ML/DL pipeline dependencies remain in requirements.txt.
+# =============================================================================
+
+# Core data handling
+numpy>=1.24.0,<2.0
+pandas>=2.0.0,<3.0
+scipy>=1.10.0,<2.0
+pyarrow>=14.0.0,<20.0
+
+# Dashboard
+streamlit>=1.30.0,<2.0
+plotly>=5.18.0,<6.0
+
+# Configuration
+pyyaml>=6.0
+
+# Runtime service integrations used by dashboard health/status views
+redis>=5.0.0,<6.0
+mlflow-skinny==2.12.1
+cryptography==42.0.8
+sqlalchemy>=2.0.0,<3.0

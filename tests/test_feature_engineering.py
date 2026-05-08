@@ -438,6 +438,25 @@ class TestMissingAndOutlierHandling:
         assert features["avg_session_duration"].max() < 1e9
 
 
+class TestFeatureMemoryOptimizations:
+    """Regression tests for memory-conscious feature preparation."""
+
+    def test_prepare_events_drops_unused_object_columns(
+        self, feature_engineer, sample_events
+    ):
+        events = sample_events.copy()
+        events["marketing_channel"] = "email"
+        events["marketing_response"] = "opened"
+
+        prepared = feature_engineer._prepare_events_for_features(events)
+
+        assert "marketing_channel" not in prepared.columns
+        assert "marketing_response" not in prepared.columns
+        assert isinstance(prepared["customer_id"].dtype, pd.CategoricalDtype)
+        assert isinstance(prepared["event_type"].dtype, pd.CategoricalDtype)
+        assert pd.api.types.is_datetime64_any_dtype(prepared["event_date"])
+
+
 class TestFeatureStore:
     """Test file-based feature store save/load."""
 

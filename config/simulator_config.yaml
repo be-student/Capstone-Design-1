@@ -95,7 +95,7 @@ mlflow:
     artifact_location: "/mlflow/artifacts"
     server_host: "0.0.0.0"
     server_port: 5000
-    backend_store_uri: "sqlite:///mlflow/mlflow.db"
+    backend_store_uri: "sqlite:////mlflow/mlflow.db"
 
 # ---------------------------------------------------------------------------
 # Redis settings (streaming and caching)

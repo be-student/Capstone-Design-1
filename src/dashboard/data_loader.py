@@ -1588,11 +1588,19 @@ class DashboardDataLoader:
                     )
                     if derived.get("metrics"):
                         return derived
+                    snapshot = self._snapshot_performance_alerts(
+                        pd.DataFrame(latest), derived
+                    )
+                    if snapshot.get("metrics"):
+                        return snapshot
 
         history = self.load_model_performance_history()
         if history.empty:
             return {}
-        return self._derive_performance_alerts(history)
+        derived = self._derive_performance_alerts(history)
+        if derived.get("metrics"):
+            return derived
+        return self._snapshot_performance_alerts(history, derived)
 
     def _derive_performance_alerts(
         self, history: pd.DataFrame,
@@ -1607,6 +1615,61 @@ class DashboardDataLoader:
             thresholds=self.config,
         )
         return self._normalize_performance_alerts(alerts)
+
+    def _snapshot_performance_alerts(
+        self,
+        history: pd.DataFrame,
+        base_alerts: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Expose current metric fields when degradation history is too short."""
+        if history is None or history.empty:
+            return self._normalize_performance_alerts(base_alerts or {})
+
+        snapshot = history.copy()
+        if "model_type" not in snapshot.columns and "model" in snapshot.columns:
+            snapshot = snapshot.rename(columns={"model": "model_type"})
+        if "auc" not in snapshot.columns and "auc_roc" in snapshot.columns:
+            snapshot["auc"] = snapshot["auc_roc"]
+        if "model_type" in snapshot.columns:
+            models = snapshot["model_type"].astype(str)
+            if (models == "ensemble").any():
+                snapshot = snapshot.loc[models == "ensemble"]
+        if "timestamp" in snapshot.columns:
+            snapshot = snapshot.sort_values("timestamp")
+
+        current_row = snapshot.iloc[-1]
+        normalized = self._normalize_performance_alerts(base_alerts or {})
+        thresholds = normalized.get("thresholds", {})
+        current_timestamp = str(current_row.get("timestamp", ""))
+        metrics: Dict[str, Dict[str, Any]] = {}
+        for metric in ["auc", "precision", "recall", "f1_score", "accuracy"]:
+            if metric not in snapshot.columns:
+                continue
+            current = pd.to_numeric(
+                pd.Series([current_row.get(metric)]), errors="coerce"
+            ).iloc[0]
+            if pd.isna(current):
+                continue
+            current = float(current)
+            metrics[metric] = {
+                "metric": metric,
+                "current": current,
+                "baseline": current,
+                "drop": 0.0,
+                "threshold": float(thresholds.get(metric, 0.0)),
+                "status": "ok",
+                "current_timestamp": current_timestamp,
+                "baseline_timestamp": current_timestamp,
+            }
+
+        normalized["metrics"] = metrics
+        normalized["metric_alerts"] = metrics
+        if metrics:
+            normalized["status"] = "ok"
+            normalized["alert_level"] = "green"
+            normalized["performance_degradation"] = False
+            normalized["degraded_metrics"] = []
+        return normalized
 
     @staticmethod
     def _normalize_performance_alerts(

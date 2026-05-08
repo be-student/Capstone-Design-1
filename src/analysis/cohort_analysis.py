@@ -59,24 +59,36 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 def _normalize_event_schema(events_df: pd.DataFrame) -> pd.DataFrame:
     """Return event data with canonical columns used by cohort helpers."""
-    events = events_df.copy()
-    if "event_date" not in events.columns:
-        for candidate in ("timestamp", "event_timestamp", "date"):
-            if candidate in events.columns:
-                events["event_date"] = pd.to_datetime(events[candidate]).dt.normalize()
-                break
-    if "event_type" not in events.columns:
-        for candidate in ("event_name", "type", "activity", "event"):
-            if candidate in events.columns:
-                events["event_type"] = events[candidate]
-                break
-    missing = {"customer_id", "event_date", "event_type"} - set(events.columns)
+    columns: Dict[str, pd.Series] = {}
+    if "customer_id" in events_df.columns:
+        columns["customer_id"] = events_df["customer_id"]
+
+    date_source = None
+    for candidate in ("event_date", "timestamp", "event_timestamp", "date"):
+        if candidate in events_df.columns:
+            date_source = candidate
+            break
+    if date_source is not None:
+        dates = pd.to_datetime(events_df[date_source])
+        columns["event_date"] = (
+            dates.dt.normalize() if date_source != "event_date" else dates
+        )
+
+    type_source = None
+    for candidate in ("event_type", "event_name", "type", "activity", "event"):
+        if candidate in events_df.columns:
+            type_source = candidate
+            break
+    if type_source is not None:
+        columns["event_type"] = events_df[type_source]
+
+    missing = {"customer_id", "event_date", "event_type"} - set(columns)
     if missing:
         raise KeyError(
             "Event data missing required cohort columns: "
             + ", ".join(sorted(missing))
         )
-    events["event_date"] = pd.to_datetime(events["event_date"])
+    events = pd.DataFrame(columns, copy=False).copy()
     events["event_type"] = events["event_type"].astype(str)
     return events
 

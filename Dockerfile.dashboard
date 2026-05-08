@@ -21,9 +21,9 @@ RUN apt-get update && \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies first (cache layer)
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy dashboard requirements and install Python dependencies first (cache layer)
+COPY requirements-dashboard.txt /app/requirements-dashboard.txt
+RUN pip install --no-cache-dir --timeout 180 --retries 10 -r requirements-dashboard.txt
 
 # Copy application source code
 COPY src/ /app/src/

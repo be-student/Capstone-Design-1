@@ -8,7 +8,9 @@
       "primary_path": "models/ml_churn_model.pkl.joblib",
       "versioned_path": "models/ml_churn_model_v1.pkl.joblib",
       "metadata": {
-        "model_type": "existing_compatibility_artifact"
+        "model_type": "lightgbm",
+        "n_folds": 5,
+        "feature_count": 33
       }
     },
     {
@@ -19,7 +21,9 @@
       "primary_path": "models/dl_churn_model.pt",
       "versioned_path": "models/dl_churn_model_v1.pt",
       "metadata": {
-        "architecture": "transformer"
+        "architecture": "transformer",
+        "sequence_window": 6,
+        "input_size": 40
       }
     }
   ]

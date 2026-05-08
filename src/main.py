@@ -27,14 +27,26 @@ Usage:
 """
 
 import argparse
+import gc
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Keep native ML libraries from oversubscribing memory-constrained Docker runs.
+for _thread_env in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_env, "1")
 
 import numpy as np
 import pandas as pd
@@ -58,6 +70,10 @@ DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 DEFAULT_RESULTS_DIR = PROJECT_ROOT / "results"
 DEFAULT_MODELS_DIR = PROJECT_ROOT / "models"
 DEFAULT_ARTIFACTS_DIR = PROJECT_ROOT / "data" / "artifacts"
+EVENT_LOAD_COLUMNS = [
+    "customer_id", "event_type", "event_date", "event_timestamp",
+    "timestamp", "amount", "revenue", "session_duration",
+]
 
 REQUIRED_PIPELINE_ARTIFACTS = [
     "model_metrics.json",
@@ -121,6 +137,112 @@ def load_config(config_path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config or {}
+
+
+def _env_truthy(value: Optional[str]) -> bool:
+    """Return True for common truthy environment values."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _running_in_docker() -> bool:
+    """Detect Docker only for runtime config selection, not business logic."""
+    runtime = os.environ.get("PIPELINE_RUNTIME", "").strip().lower()
+    if runtime:
+        return runtime == "docker"
+    return Path("/.dockerenv").exists()
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    """Coerce environment/config values to int with a stable fallback."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_runtime_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply Docker/runtime environment overrides to connection config.
+
+    This keeps docker-compose service discovery out of business logic while
+    ensuring every pipeline stage sees the same MLflow and Redis settings.
+    """
+    mlflow_cfg = config.get("mlflow")
+    if isinstance(mlflow_cfg, dict):
+        docker_cfg = mlflow_cfg.get("docker", {}) or {}
+        env_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+        if env_tracking_uri:
+            mlflow_cfg["tracking_uri"] = env_tracking_uri
+
+        env_artifact_location = (
+            os.environ.get("MLFLOW_ARTIFACT_LOCATION")
+            or os.environ.get("MLFLOW_ARTIFACT_ROOT")
+        )
+        if env_artifact_location:
+            mlflow_cfg["artifact_location"] = env_artifact_location
+        elif env_tracking_uri and _running_in_docker() and docker_cfg.get("artifact_location"):
+            mlflow_cfg["artifact_location"] = docker_cfg["artifact_location"]
+
+    redis_cfg = config.get("redis")
+    if isinstance(redis_cfg, dict):
+        env_host = os.environ.get("REDIS_HOST")
+        if env_host:
+            redis_cfg["host"] = env_host
+        if os.environ.get("REDIS_PORT"):
+            redis_cfg["port"] = _coerce_int(
+                os.environ.get("REDIS_PORT"),
+                _coerce_int(redis_cfg.get("port"), 6379),
+            )
+
+    return config
+
+
+def _simulation_runtime_shape(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+) -> Dict[str, int]:
+    """Return the effective simulation size for checkpoint validation."""
+    sim_cfg = config.get("simulation", {}) or {}
+    if bool(getattr(args, "small", False)):
+        small_cfg = sim_cfg.get("small_mode", {}) or {}
+        return {
+            "num_customers": _coerce_int(
+                small_cfg.get("num_customers", sim_cfg.get("num_customers")),
+                5000,
+            ),
+            "simulation_days": _coerce_int(
+                small_cfg.get("simulation_days", sim_cfg.get("simulation_days")),
+                180,
+            ),
+        }
+    return {
+        "num_customers": _coerce_int(sim_cfg.get("num_customers"), 0),
+        "simulation_days": _coerce_int(sim_cfg.get("simulation_days"), 0),
+    }
+
+
+def _runtime_checkpoint_context(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+    data_dir: Path,
+    results_dir: Path,
+) -> Dict[str, Any]:
+    """Build stable runtime identity for checkpoint freshness checks."""
+    mlflow_cfg = config.get("mlflow", {}) or {}
+    redis_cfg = config.get("redis", {}) or {}
+    shape = _simulation_runtime_shape(config, args)
+    return {
+        "checkpoint_version": 2,
+        "small": bool(getattr(args, "small", False)),
+        "data_dir": str(data_dir.resolve()),
+        "results_dir": str(results_dir.resolve()),
+        "num_customers": shape["num_customers"],
+        "simulation_days": shape["simulation_days"],
+        "mlflow_tracking_uri": str(mlflow_cfg.get("tracking_uri", "")),
+        "mlflow_artifact_location": str(mlflow_cfg.get("artifact_location", "")),
+        "redis_host": str(redis_cfg.get("host", "")),
+        "redis_port": _coerce_int(redis_cfg.get("port"), 6379),
+        "runtime": os.environ.get("PIPELINE_RUNTIME", "local"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -623,11 +745,17 @@ def _feature_monthly_panel(
     """Build a coarse customer-month feature panel for sequence models."""
     if "event_date" not in events.columns:
         return pd.DataFrame()
-    panel = events.copy()
-    panel["event_date"] = pd.to_datetime(panel["event_date"])
-    panel["month"] = panel["event_date"].dt.to_period("M").astype(str)
+    panel_cols = ["customer_id", "event_date", "event_type"]
+    if "amount" in events.columns:
+        panel_cols.append("amount")
+    panel = events[panel_cols].copy()
+    if not pd.api.types.is_datetime64_any_dtype(panel["event_date"]):
+        panel["event_date"] = pd.to_datetime(panel["event_date"])
+    panel["month"] = (
+        panel["event_date"].dt.to_period("M").astype("int64").astype("int32")
+    )
 
-    agg = panel.groupby(["customer_id", "month"]).agg(
+    agg = panel.groupby(["customer_id", "month"], observed=True).agg(
         event_count=("event_type", "count"),
         purchase_count=("event_type", lambda s: int((s == "purchase").sum())),
         page_view_count=("event_type", lambda s: int((s == "page_view").sum())),
@@ -637,7 +765,11 @@ def _feature_monthly_panel(
     ).reset_index()
 
     if "amount" in panel.columns:
-        amount = panel.groupby(["customer_id", "month"])["amount"].sum().reset_index(name="monthly_amount")
+        amount = (
+            panel.groupby(["customer_id", "month"], observed=True)["amount"]
+            .sum()
+            .reset_index(name="monthly_amount")
+        )
         agg = agg.merge(amount, on=["customer_id", "month"], how="left")
     else:
         agg["monthly_amount"] = 0.0
@@ -806,12 +938,174 @@ def _load_events(data_dir: Path) -> pd.DataFrame:
     for ext in ("parquet", "csv"):
         p = data_dir / f"events.{ext}"
         if p.exists():
-            df = pd.read_parquet(p) if ext == "parquet" else pd.read_csv(p)
-            for col in ("event_date", "event_timestamp"):
+            if ext == "parquet":
+                columns: Optional[List[str]] = None
+                try:
+                    import pyarrow.parquet as pq
+                    available = set(pq.ParquetFile(p).schema.names)
+                    columns = [c for c in EVENT_LOAD_COLUMNS if c in available]
+                except Exception:
+                    columns = None
+                df = pd.read_parquet(p, columns=columns)
+            else:
+                df = pd.read_csv(
+                    p,
+                    usecols=lambda c: c in EVENT_LOAD_COLUMNS,
+                )
+            for col in ("event_date", "event_timestamp", "timestamp"):
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col])
+            for col in ("customer_id", "event_type"):
+                if col in df.columns:
+                    df[col] = df[col].astype("category")
+            for col in ("amount", "revenue", "session_duration"):
+                if col in df.columns:
+                    df[col] = pd.to_numeric(
+                        df[col], errors="coerce", downcast="float"
+                    )
             return df
     raise FileNotFoundError(f"No event data in {data_dir}. Run --mode simulate first.")
+
+
+def _format_temporal_cohort_labels(dates: pd.Series, cohort_type: str) -> pd.Series:
+    """Return monthly/weekly cohort labels while preserving invalid dates."""
+    parsed = pd.to_datetime(dates, errors="coerce")
+    labels = pd.Series("NaT", index=parsed.index, dtype=object)
+    valid = parsed.notna()
+    if not valid.any():
+        return labels
+
+    if cohort_type == "monthly":
+        labels.loc[valid] = parsed.loc[valid].dt.to_period("M").astype(str)
+    elif cohort_type == "weekly":
+        iso = parsed.loc[valid].dt.isocalendar()
+        labels.loc[valid] = (
+            iso["year"].astype(str)
+            + "-W"
+            + iso["week"].astype(str).str.zfill(2)
+        )
+    else:
+        raise ValueError(
+            f"Unknown cohort_type: {cohort_type}. "
+            "Expected 'monthly', 'weekly', or 'behavioral'."
+        )
+    return labels
+
+
+def _build_compact_temporal_cohort_data(
+    events: pd.DataFrame,
+    customers: pd.DataFrame,
+    cohort_type: str,
+) -> pd.DataFrame:
+    """Build a deduplicated cohort-period frame without copying all events.
+
+    Cohort retention only needs one row per active customer-period. The full
+    Docker data set has millions of events, so using the generic analyzer's
+    full-frame copy/merge path can exceed the container memory limit.
+    """
+    if cohort_type not in {"monthly", "weekly"}:
+        raise ValueError(
+            f"Unknown cohort_type: {cohort_type}. "
+            "Expected 'monthly', 'weekly', or 'behavioral'."
+        )
+    if events.empty or "customer_id" not in events.columns or "event_date" not in events.columns:
+        return pd.DataFrame(columns=["customer_id", "cohort", "cohort_period"])
+
+    event_dates = pd.to_datetime(events["event_date"], errors="coerce")
+    event_dates_np = event_dates.to_numpy(dtype="datetime64[ns]", copy=False)
+    customer_cat = events["customer_id"].astype("category")
+    codes = customer_cat.cat.codes.to_numpy(copy=False)
+    categories = customer_cat.cat.categories.astype(str).to_numpy()
+    valid_code = codes >= 0
+
+    if "signup_date" in customers.columns and "customer_id" in customers.columns:
+        customer_ids = customers["customer_id"].astype(str)
+        signup_dates = pd.to_datetime(customers["signup_date"], errors="coerce")
+        start_by_customer = pd.Series(
+            signup_dates.to_numpy(dtype="datetime64[ns]", copy=False),
+            index=customer_ids.to_numpy(),
+        )
+        category_starts = pd.to_datetime(
+            pd.Series(categories).map(start_by_customer),
+            errors="coerce",
+        ).to_numpy(dtype="datetime64[ns]")
+    else:
+        category_starts = np.full(
+            len(categories), np.datetime64("NaT"), dtype="datetime64[ns]"
+        )
+        if valid_code.any():
+            first_event_frame = pd.DataFrame(
+                {
+                    "_customer_code": codes[valid_code].astype("int32", copy=False),
+                    "_event_date": event_dates_np[valid_code],
+                }
+            ).dropna(subset=["_event_date"])
+            if not first_event_frame.empty:
+                first_by_code = first_event_frame.groupby(
+                    "_customer_code", sort=False
+                )["_event_date"].min()
+                category_starts[
+                    first_by_code.index.to_numpy(dtype=np.intp)
+                ] = first_by_code.to_numpy(dtype="datetime64[ns]", copy=False)
+            del first_event_frame
+
+    valid_category_start = ~pd.isna(pd.Series(category_starts)).to_numpy()
+    valid_start = np.zeros(len(codes), dtype=bool)
+    valid_start[valid_code] = valid_category_start[codes[valid_code]]
+    valid = valid_code & event_dates.notna().to_numpy() & valid_start
+
+    if valid.any():
+        event_days = event_dates_np[valid].astype("datetime64[D]")
+        start_days = category_starts[codes[valid]].astype("datetime64[D]")
+        elapsed_days = (
+            event_days - start_days
+        ).astype("timedelta64[D]").astype("int32", copy=False)
+        divisor = 30 if cohort_type == "monthly" else 7
+        periods = np.maximum(elapsed_days // divisor, 0)
+        active = pd.DataFrame(
+            {
+                "_customer_code": codes[valid].astype("int32", copy=False),
+                "cohort_period": periods.astype("int16", copy=False),
+            }
+        ).drop_duplicates()
+        category_labels = _format_temporal_cohort_labels(
+            pd.Series(category_starts), cohort_type
+        ).to_numpy()
+        active_codes = active["_customer_code"].to_numpy(dtype=np.intp, copy=False)
+        active["customer_id"] = categories[active_codes]
+        active["cohort"] = category_labels[active_codes]
+        active = active.loc[
+            active["cohort"].ne("NaT"),
+            ["customer_id", "cohort", "cohort_period"],
+        ]
+    else:
+        active = pd.DataFrame(columns=["customer_id", "cohort", "cohort_period"])
+
+    if "signup_date" in customers.columns and "customer_id" in customers.columns:
+        base_ids = customers["customer_id"].astype(str)
+        base_dates = pd.to_datetime(customers["signup_date"], errors="coerce")
+    else:
+        base_ids = pd.Series(categories)
+        base_dates = pd.Series(category_starts)
+    base_labels = _format_temporal_cohort_labels(
+        pd.Series(base_dates).reset_index(drop=True),
+        cohort_type,
+    )
+    base = pd.DataFrame(
+        {
+            "customer_id": pd.Series(base_ids).reset_index(drop=True).to_numpy(),
+            "cohort": base_labels.to_numpy(),
+            "cohort_period": np.zeros(len(base_labels), dtype="int16"),
+        }
+    )
+    base = base[base["cohort"].ne("NaT")]
+
+    cohort_data = pd.concat([base, active], ignore_index=True, sort=False)
+    if not cohort_data.empty:
+        cohort_data = cohort_data.drop_duplicates(
+            ["cohort", "cohort_period", "customer_id"]
+        )
+    return cohort_data
 
 
 _FEATURE_CACHE: Optional[pd.DataFrame] = None
@@ -2018,28 +2312,15 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
                 .values
             )
         customers["churn_label"] = 0
-    if "signup_date" in customers.columns and "signup_date" not in events.columns:
-        events = events.merge(
-            customers[["customer_id", "signup_date", "churn_label"]],
-            on="customer_id",
-            how="left",
-        )
-    cohort_events = events
-    if "signup_date" in customers.columns:
-        signup_rows = customers[["customer_id", "signup_date"]].copy()
-        signup_rows["event_date"] = pd.to_datetime(signup_rows["signup_date"])
-        signup_rows["timestamp"] = signup_rows["event_date"]
-        signup_rows["event_type"] = "signup"
-        if "amount" in events.columns:
-            signup_rows["amount"] = 0.0
-        if "churn_label" in customers.columns:
-            signup_rows["churn_label"] = customers["churn_label"].values
-        cohort_events = pd.concat([events, signup_rows], ignore_index=True, sort=False)
-
     cohort_type = getattr(args, "cohort_type", "monthly")
     logger.info("Running cohort analysis (type=%s)...", cohort_type)
     analyzer = CohortAnalyzer()
-    cohort_data = analyzer.assign_cohorts(cohort_events, cohort_type=cohort_type)
+    if cohort_type in {"monthly", "weekly"}:
+        cohort_data = _build_compact_temporal_cohort_data(
+            events, customers, cohort_type
+        )
+    else:
+        cohort_data = analyzer.assign_cohorts(events, cohort_type=cohort_type)
     retention = analyzer.compute_retention_matrix(cohort_data)
 
     errors: List[str] = []
@@ -2104,6 +2385,9 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
 
         churn_rates = analyzer.compute_churn_rates(retention)
         _save_result_and_artifact(churn_rates.reset_index(), results_dir / "cohort_churn_rates.csv", config)
+
+    del cohort_data
+    gc.collect()
 
     try:
         seq = extract_churn_sequences(events, customers, top_n=5)
@@ -2349,7 +2633,11 @@ def run_features(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
 
 def run_monitor(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Run model monitoring -- PSI and KS drift detection."""
-    from src.monitoring import DriftDetector, KSDriftDetector
+    from src.monitoring import (
+        DriftDetector,
+        KSDriftDetector,
+        evaluate_performance_degradation,
+    )
 
     data_dir, results_dir, _ = _resolve_dirs(args)
     customers = _load_customers(data_dir)
@@ -2461,6 +2749,54 @@ def run_monitor(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
             perf = pd.DataFrame(rows)
             _save_result_and_artifact(perf, results_dir / "model_performance_history.csv", config)
             report["performance"]["latest"] = rows
+            performance_alerts = evaluate_performance_degradation(
+                perf,
+                thresholds=config,
+            )
+            if not performance_alerts.get("metrics"):
+                selected = perf
+                if "model" in selected.columns and (selected["model"] == "ensemble").any():
+                    selected = selected[selected["model"] == "ensemble"]
+                current = selected.iloc[-1]
+                thresholds = performance_alerts.get("thresholds", {})
+                current_timestamp = str(current.get("timestamp", ""))
+                metric_alerts = {}
+                for metric in ["auc", "precision", "recall", "f1_score", "accuracy"]:
+                    if metric not in selected.columns:
+                        continue
+                    value = pd.to_numeric(
+                        pd.Series([current.get(metric)]), errors="coerce"
+                    ).iloc[0]
+                    if pd.isna(value):
+                        continue
+                    value = float(value)
+                    metric_alerts[metric] = {
+                        "metric": metric,
+                        "current": value,
+                        "baseline": value,
+                        "drop": 0.0,
+                        "threshold": float(thresholds.get(metric, 0.0)),
+                        "status": "ok",
+                        "current_timestamp": current_timestamp,
+                        "baseline_timestamp": current_timestamp,
+                    }
+                if metric_alerts:
+                    performance_alerts.update(
+                        {
+                            "status": "ok",
+                            "alert_level": "green",
+                            "performance_degradation": False,
+                            "metrics": metric_alerts,
+                            "metric_alerts": metric_alerts,
+                            "degraded_metrics": [],
+                        }
+                    )
+            report["performance"]["performance_alerts"] = performance_alerts
+            report["performance"]["alerts"] = performance_alerts
+            report["performance_alerts"] = performance_alerts
+            report["performance_degradation"] = bool(
+                performance_alerts.get("performance_degradation")
+            )
 
     _save_result_and_artifact(report, results_dir / "monitoring_report.json", config)
     logger.info("Monitoring: PSI alerts=%d, KS alerts=%d",
@@ -2513,14 +2849,8 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         output_dir=str(results_dir),
     )
 
-    run_context = {
-        "small": bool(args.small),
-        "data_dir": str(data_dir.resolve()),
-        "results_dir": str(results_dir.resolve()),
-        "num_customers": int(config.get("simulation", {}).get("num_customers", 0)),
-        "simulation_days": int(config.get("simulation", {}).get("simulation_days", 0)),
-        "step_order": PipelineRunner(config=config).get_step_order(),
-    }
+    run_context = _runtime_checkpoint_context(config, args, data_dir, results_dir)
+    run_context["step_order"] = PipelineRunner(config=config).get_step_order()
     state = runner.get_state()
     def _csv_row_count(path: Path) -> Optional[int]:
         if not path.exists():
@@ -2538,6 +2868,14 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
             if stage.get("status") == "failed"
         ]
         expected_rows = int(run_context["num_customers"])
+        if stages.get("data_generation", {}).get("status") == "completed":
+            customers_count = _csv_row_count(data_dir / "customers.csv")
+            if customers_count != expected_rows:
+                reasons.append(
+                    f"customers.csv_row_count_{customers_count}_expected_{expected_rows}"
+                )
+            if not (data_dir / "generation_summary.json").exists():
+                reasons.append("generation_summary_missing")
         row_checked_outputs = {
             "preprocessing": "features.csv",
             "ml_model_training": "churn_predictions.csv",
@@ -2569,14 +2907,21 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         return reasons
 
     stale_reasons = _stale_completed_stage_reasons(state)
-    if state.get("run_context") != run_context or stale_reasons:
+    force_reset = _env_truthy(os.environ.get("PIPELINE_RESET_STATE")) or _env_truthy(
+        os.environ.get("PIPELINE_FORCE_RESTART")
+    )
+    if force_reset or state.get("run_context") != run_context or stale_reasons:
         if stale_reasons:
             logger.info(
                 "Pipeline checkpoint artifacts are stale (%s); resetting state.",
                 ", ".join(stale_reasons),
             )
+        elif force_reset:
+            logger.info("Pipeline checkpoint reset requested by environment.")
         else:
             logger.info("Pipeline run context changed; resetting checkpoint state.")
+        global _FEATURE_CACHE  # noqa: PLW0603
+        _FEATURE_CACHE = None
         runner._state.reset()
         state = runner.get_state()
         state["run_context"] = run_context
@@ -2772,7 +3117,7 @@ def main(argv: Optional[List[str]] = None) -> Dict[str, Any]:
 
     logger.info("Churn Prediction CLI -- mode=%s", args.mode)
 
-    config = load_config(args.config)
+    config = _apply_runtime_overrides(load_config(args.config))
     logger.debug("Config loaded from %s", args.config)
 
     handler = MODES[args.mode]

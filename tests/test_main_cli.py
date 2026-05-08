@@ -410,6 +410,28 @@ class TestDataLoading:
         assert len(df) > 0
         assert "event_type" in df.columns
 
+    def test_load_events_uses_memory_lean_columns(self, tmp_path):
+        data_dir = tmp_path / "data" / "raw"
+        data_dir.mkdir(parents=True)
+        events = pd.DataFrame({
+            "customer_id": ["C001", "C002"],
+            "event_date": ["2024-01-01", "2024-01-02"],
+            "timestamp": ["2024-01-01 10:00:00", "2024-01-02 11:00:00"],
+            "event_type": ["page_view", "purchase"],
+            "amount": [0.0, 1000.0],
+            "marketing_channel": ["email", "sms"],
+            "marketing_response": ["opened", "clicked"],
+        })
+        events.to_csv(data_dir / "events.csv", index=False)
+
+        df = _load_events(data_dir)
+
+        assert "marketing_channel" not in df.columns
+        assert "marketing_response" not in df.columns
+        assert isinstance(df["customer_id"].dtype, pd.CategoricalDtype)
+        assert isinstance(df["event_type"].dtype, pd.CategoricalDtype)
+        assert pd.api.types.is_datetime64_any_dtype(df["timestamp"])
+
     def test_load_customers_parquet_priority(self, tmp_data_dir):
         d = Path(tmp_data_dir)
         csv_df = pd.read_csv(d / "customers.csv")

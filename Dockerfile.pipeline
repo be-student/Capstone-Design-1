@@ -43,6 +43,9 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# cryptography 48.x can SIGILL on Docker Desktop aarch64 during MLflow auth imports.
+RUN pip install --no-cache-dir --timeout 180 --retries 10 cryptography==42.0.8
+
 # Copy application source code
 COPY src/ /app/src/
 COPY config/ /app/config/

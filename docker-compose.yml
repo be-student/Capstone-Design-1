@@ -36,7 +36,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mlflow
-    container_name: churn-mlflow
     ports:
       - "${MLFLOW_PORT:-5001}:5000"
     volumes:
@@ -61,7 +60,6 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: churn-redis
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -93,7 +91,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.pipeline
-    container_name: churn-pipeline
     volumes:
       - ./config:/app/config
       - ./data:/app/data
@@ -111,6 +108,8 @@ services:
       - SMALL=${SMALL:-false}
       - BUDGET=${BUDGET:-}
       - VERBOSE=${VERBOSE:-false}
+      - PIPELINE_RESET_STATE=${PIPELINE_RESET_STATE:-false}
+      - PIPELINE_FORCE_RESTART=${PIPELINE_FORCE_RESTART:-false}
     depends_on:
       mlflow:
         condition: service_healthy
@@ -139,7 +138,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dashboard
-    container_name: churn-dashboard
     ports:
       - "${DASHBOARD_PORT:-8501}:8501"
     volumes:

@@ -212,12 +212,13 @@ class TestDockerfileDashboard:
         assert "python:3.10" in dockerfile_dashboard
 
     def test_copies_requirements(self, dockerfile_dashboard):
-        """Must copy requirements.txt."""
-        assert "requirements.txt" in dockerfile_dashboard
+        """Must copy dashboard-specific requirements."""
+        assert "requirements-dashboard.txt" in dockerfile_dashboard
 
     def test_installs_requirements(self, dockerfile_dashboard):
-        """Must install from requirements.txt."""
+        """Must install from dashboard-specific requirements."""
         assert "pip install" in dockerfile_dashboard
+        assert "requirements-dashboard.txt" in dockerfile_dashboard
 
     def test_copies_source_code(self, dockerfile_dashboard):
         """Must copy src/ directory."""
@@ -324,10 +325,10 @@ class TestMLflowServiceConfig:
         mlflow = docker_compose["services"]["mlflow"]
         assert "restart" in mlflow
 
-    def test_mlflow_container_name(self, docker_compose):
-        """MLflow must have a container name."""
+    def test_mlflow_omits_container_name(self, docker_compose):
+        """MLflow must rely on Compose project-scoped container names."""
         mlflow = docker_compose["services"]["mlflow"]
-        assert "container_name" in mlflow
+        assert "container_name" not in mlflow
 
     def test_mlflow_environment_variables(self, docker_compose):
         """MLflow must set required environment variables."""
@@ -625,17 +626,28 @@ class TestDockerBuildReadiness:
     """Integration smoke tests: verify all files referenced by Docker setup exist."""
 
     def test_requirements_txt_exists(self, project_root):
-        """requirements.txt must exist for Docker builds."""
+        """requirements.txt must exist for pipeline Docker builds."""
         assert (project_root / "requirements.txt").exists()
 
+    def test_requirements_dashboard_txt_exists(self, project_root):
+        """requirements-dashboard.txt must exist for dashboard Docker builds."""
+        assert (project_root / "requirements-dashboard.txt").exists()
+
     def test_requirements_has_core_deps(self, project_root):
-        """requirements.txt must include core dependencies."""
+        """requirements.txt must include core pipeline dependencies."""
         reqs = (project_root / "requirements.txt").read_text()
         assert "numpy" in reqs
         assert "pandas" in reqs
         assert "torch" in reqs
         assert "scikit-learn" in reqs
+        assert "mlflow" in reqs
+
+    def test_dashboard_requirements_has_runtime_deps(self, project_root):
+        """requirements-dashboard.txt must include dashboard runtime dependencies."""
+        reqs = (project_root / "requirements-dashboard.txt").read_text()
         assert "streamlit" in reqs
+        assert "plotly" in reqs
+        assert "redis" in reqs
         assert "mlflow" in reqs
 
     def test_src_directory_exists(self, project_root):
@@ -775,36 +787,36 @@ class TestPortConfiguration:
 # ---------------------------------------------------------------------------
 
 class TestContainerNaming:
-    """Test container naming conventions."""
+    """Test Compose-compatible container naming conventions."""
 
-    def test_mlflow_container_name(self, docker_compose):
-        """MLflow must have a descriptive container name."""
+    def test_mlflow_omits_container_name(self, docker_compose):
+        """MLflow must allow Compose to generate a project-scoped name."""
         mlflow = docker_compose["services"]["mlflow"]
-        assert "churn" in mlflow.get("container_name", "").lower()
+        assert "container_name" not in mlflow
 
-    def test_redis_container_name(self, docker_compose):
-        """Redis must have a descriptive container name."""
+    def test_redis_omits_container_name(self, docker_compose):
+        """Redis must allow Compose to generate a project-scoped name."""
         redis = docker_compose["services"]["redis"]
-        assert "churn" in redis.get("container_name", "").lower()
+        assert "container_name" not in redis
 
-    def test_pipeline_container_name(self, docker_compose):
-        """Pipeline must have a descriptive container name."""
+    def test_pipeline_omits_container_name(self, docker_compose):
+        """Pipeline must allow Compose to generate a project-scoped name."""
         pipeline = docker_compose["services"]["pipeline"]
-        assert "churn" in pipeline.get("container_name", "").lower()
+        assert "container_name" not in pipeline
 
-    def test_dashboard_container_name(self, docker_compose):
-        """Dashboard must have a descriptive container name."""
+    def test_dashboard_omits_container_name(self, docker_compose):
+        """Dashboard must allow Compose to generate a project-scoped name."""
         dashboard = docker_compose["services"]["dashboard"]
-        assert "churn" in dashboard.get("container_name", "").lower()
+        assert "container_name" not in dashboard
 
-    def test_container_names_unique(self, docker_compose):
-        """All container names must be unique."""
-        names = []
-        for service in docker_compose["services"].values():
-            name = service.get("container_name", "")
-            if name:
-                assert name not in names, f"Duplicate container name: {name}"
-                names.append(name)
+    def test_no_explicit_container_names(self, docker_compose):
+        """Services must not pin global container names."""
+        services_with_container_names = [
+            name
+            for name, service in docker_compose["services"].items()
+            if "container_name" in service
+        ]
+        assert services_with_container_names == []
 
 
 # ---------------------------------------------------------------------------

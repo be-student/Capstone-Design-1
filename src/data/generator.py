@@ -16,7 +16,7 @@ Usage:
 import os
 import warnings
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -69,6 +69,10 @@ class CustomerDataGenerator:
         self.simulation_days = sim_cfg.get(
             "simulation_days",
             sim_cfg.get("simulation_months", 12) * 30
+        )
+        self.event_chunk_size = max(
+            10_000,
+            int(sim_cfg.get("event_chunk_size", 100_000)),
         )
         self.start_date = pd.Timestamp(sim_cfg["start_date"])
         self.end_date = self.start_date + timedelta(days=self.simulation_days - 1)
@@ -303,9 +307,14 @@ class CustomerDataGenerator:
                 )
             )
 
+        reactivation_events = self._events_to_dataframe(
+            rows,
+            customer_categories=customers_df["customer_id"].astype(str).tolist(),
+        )
         calibrated_events = pd.concat(
-            [events_df, pd.DataFrame(rows)],
+            [events_df, reactivation_events],
             ignore_index=True,
+            copy=False,
         )
         calibrated_customers = self._label_churn(customers_df, calibrated_events)
         return calibrated_customers, calibrated_events
@@ -337,25 +346,109 @@ class CustomerDataGenerator:
         Returns:
             DataFrame of all events across all customers.
         """
-        all_events: List[Dict[str, Any]] = []
+        customer_categories = customers_df["customer_id"].astype(str).tolist()
+        event_chunks: List[pd.DataFrame] = []
+        pending_rows: List[Tuple[Any, ...]] = []
+        customer_rows = customers_df[
+            ["customer_id", "persona", "signup_date", "treatment_group"]
+        ].sort_values("customer_id", kind="mergesort")
 
-        for _, customer in customers_df.iterrows():
-            persona_cfg = self._get_persona_config(customer["persona"])
+        event_inputs = customer_rows.itertuples(index=False, name=None)
+        for customer_id, persona, signup_date, treatment_group in event_inputs:
+            persona_cfg = self._get_persona_config(persona)
             events = self._generate_customer_events(
-                customer_id=customer["customer_id"],
+                customer_id=customer_id,
                 persona_cfg=persona_cfg,
-                signup_date=pd.Timestamp(customer["signup_date"]),
-                is_treatment=customer["treatment_group"] == "treatment",
+                signup_date=pd.Timestamp(signup_date),
+                is_treatment=treatment_group == "treatment",
             )
-            all_events.extend(events)
+            events.sort(key=lambda event: event["timestamp"])
+            pending_rows.extend(
+                tuple(event.get(column) for column in self.EVENT_COLUMNS)
+                for event in events
+            )
 
-        events_df = pd.DataFrame(all_events)
-        if len(events_df) == 0:
-            events_df = pd.DataFrame(columns=self.EVENT_COLUMNS)
+            if len(pending_rows) >= self.event_chunk_size:
+                event_chunks.append(
+                    self._events_to_dataframe(
+                        pending_rows,
+                        customer_categories=customer_categories,
+                    )
+                )
+                pending_rows = []
 
-        return events_df.sort_values(
-            ["customer_id", "timestamp"]
-        ).reset_index(drop=True)
+        if pending_rows:
+            event_chunks.append(
+                self._events_to_dataframe(
+                    pending_rows,
+                    customer_categories=customer_categories,
+                )
+            )
+
+        if not event_chunks:
+            return pd.DataFrame(columns=self.EVENT_COLUMNS)
+
+        return pd.concat(event_chunks, ignore_index=True, copy=False)
+
+    def _events_to_dataframe(
+        self,
+        rows: Sequence[Dict[str, Any] | Tuple[Any, ...]],
+        customer_categories: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """Convert generated event rows to a compact DataFrame chunk."""
+        if not rows:
+            return pd.DataFrame(columns=self.EVENT_COLUMNS)
+
+        events_df = pd.DataFrame.from_records(rows, columns=self.EVENT_COLUMNS)
+        return self._optimize_events_dataframe(events_df, customer_categories)
+
+    def _optimize_events_dataframe(
+        self,
+        events_df: pd.DataFrame,
+        customer_categories: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """Use compact dtypes for high-volume event logs."""
+        if events_df.empty:
+            return events_df
+
+        if customer_categories is not None:
+            events_df["customer_id"] = pd.Categorical(
+                events_df["customer_id"],
+                categories=customer_categories,
+                ordered=True,
+            )
+        else:
+            events_df["customer_id"] = events_df["customer_id"].astype("category")
+
+        events_df["event_type"] = pd.Categorical(
+            events_df["event_type"],
+            categories=self.event_types,
+        )
+        events_df["event_date"] = pd.to_datetime(
+            events_df["event_date"],
+            errors="coerce",
+        )
+        events_df["timestamp"] = pd.to_datetime(
+            events_df["timestamp"],
+            errors="coerce",
+        )
+        events_df["amount"] = pd.to_numeric(
+            events_df["amount"],
+            errors="coerce",
+        ).astype("float32")
+        events_df["session_duration"] = pd.to_numeric(
+            events_df["session_duration"],
+            errors="coerce",
+        ).astype("float32")
+        events_df["marketing_channel"] = pd.Categorical(
+            events_df["marketing_channel"],
+            categories=["coupon", "push_notification"],
+        )
+        events_df["marketing_response"] = pd.Categorical(
+            events_df["marketing_response"],
+            categories=sorted(self.MARKETING_RESPONSES),
+        )
+        return events_df
 
     def _generate_customer_events(
         self,
@@ -718,41 +811,54 @@ class CustomerDataGenerator:
             customers_df["churn_label"] = 1
             return customers_df
 
-        events_tmp = events_df.copy()
-        events_tmp["event_date_dt"] = pd.to_datetime(events_tmp["event_date"])
+        event_dates = events_df["event_date"]
+        if not pd.api.types.is_datetime64_any_dtype(event_dates):
+            event_dates = pd.to_datetime(event_dates, errors="coerce")
 
         # Last purchase date per customer (vectorized)
-        purchases = events_tmp[events_tmp["event_type"] == "purchase"]
+        purchase_mask = events_df["event_type"].eq("purchase")
         last_purchase = (
-            purchases.groupby("customer_id")["event_date_dt"]
+            event_dates[purchase_mask]
+            .groupby(
+                events_df.loc[purchase_mask, "customer_id"],
+                sort=False,
+                observed=True,
+            )
             .max()
             .rename("last_purchase_date")
         )
 
         # Last visit date per customer (vectorized)
-        visits = events_tmp[
-            events_tmp["event_type"].isin(["page_view", "search"])
-        ]
+        visit_mask = events_df["event_type"].isin(["page_view", "search"])
         last_visit = (
-            visits.groupby("customer_id")["event_date_dt"]
+            event_dates[visit_mask]
+            .groupby(
+                events_df.loc[visit_mask, "customer_id"],
+                sort=False,
+                observed=True,
+            )
             .max()
             .rename("last_visit_date")
         )
 
-        # Merge with customers
-        customers_df = customers_df.merge(
-            last_purchase, left_on="customer_id", right_index=True, how="left"
+        last_purchase.index = last_purchase.index.astype(str)
+        last_visit.index = last_visit.index.astype(str)
+        customer_ids = customers_df["customer_id"].astype(str)
+        last_purchase_dates = pd.to_datetime(
+            customer_ids.map(last_purchase),
+            errors="coerce",
         )
-        customers_df = customers_df.merge(
-            last_visit, left_on="customer_id", right_index=True, how="left"
+        last_visit_dates = pd.to_datetime(
+            customer_ids.map(last_visit),
+            errors="coerce",
         )
 
         # Compute days since last activity
         days_since_purchase = (
-            ref_date - customers_df["last_purchase_date"]
+            ref_date - last_purchase_dates
         ).dt.days.fillna(self.simulation_days)
         days_since_visit = (
-            ref_date - customers_df["last_visit_date"]
+            ref_date - last_visit_dates
         ).dt.days.fillna(self.simulation_days)
 
         # Apply churn definition
@@ -765,7 +871,4 @@ class CustomerDataGenerator:
             is_churned = no_purchase_churn & no_login_churn
 
         customers_df["churn_label"] = is_churned.astype(int)
-        customers_df = customers_df.drop(
-            columns=["last_purchase_date", "last_visit_date"]
-        )
         return customers_df
