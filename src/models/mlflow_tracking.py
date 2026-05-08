@@ -44,9 +44,17 @@ TEXT_ARTIFACT_NAMES = {
 
 
 def _is_local_absolute_path(value: str) -> bool:
-    """Return True for common workstation absolute path forms."""
+    """Return True for common workstation absolute path forms.
+
+    Recognizes POSIX roots (``/Users``, ``/home``, ``/private``) and Windows
+    drive roots (``C:\\Users``, ``D:\\Users``, ...).
+    """
     parts = Path(value).parts
-    return len(parts) > 1 and parts[0] == os.sep and parts[1] in LOCAL_ROOT_NAMES
+    if len(parts) < 2 or parts[1] not in LOCAL_ROOT_NAMES:
+        return False
+    if parts[0] == os.sep:
+        return True
+    return bool(os.path.splitdrive(value)[0])
 
 
 def _collapse_absolute_path(value: str) -> str:
