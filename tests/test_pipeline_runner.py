@@ -368,6 +368,10 @@ class TestPipelineArtifactValidation:
         (artifacts_dir / "cohort_churn_rate_differences.png").write_bytes(
             b"stale-cohort-churn-plot"
         )
+        (artifacts_dir / "required_artifacts_checklist.json").write_text(
+            json.dumps({"stale": True}),
+            encoding="utf-8",
+        )
 
         monkeypatch.setattr(
             main_mod,
@@ -405,6 +409,19 @@ class TestPipelineArtifactValidation:
         assert (
             artifacts_dir / "cohort_churn_rate_differences.png"
         ).read_bytes() == b"fresh-cohort-churn-plot"
+        results_checklist_path = results_dir / "required_artifacts_checklist.json"
+        artifact_checklist_path = artifacts_dir / "required_artifacts_checklist.json"
+        assert (
+            artifact_checklist_path.read_bytes()
+            == results_checklist_path.read_bytes()
+        )
+        mirrored_checklist = json.loads(
+            artifact_checklist_path.read_text(encoding="utf-8")
+        )
+        assert mirrored_checklist["required_count"] == 2
+        assert {
+            row["artifact"] for row in mirrored_checklist["artifacts"]
+        } == {"recommendations.csv", "cohort_churn_rate_differences.png"}
 
     def test_run_all_fails_when_checklist_not_full_ready_even_without_missing(
         self, tmp_path, monkeypatch

@@ -243,6 +243,29 @@ def _save_result_and_artifact(
     _publish_artifact(config, results_path, artifact_name)
 
 
+def _save_checklist_with_mirror(
+    checklist: Dict[str, Any],
+    results_dir: Path,
+    artifact_dir: Path,
+) -> None:
+    """Write the required artifact checklist and verify its dashboard mirror."""
+    checklist_name = "required_artifacts_checklist.json"
+    results_path = results_dir / checklist_name
+    artifact_path = artifact_dir / checklist_name
+    _save_json(checklist, results_path)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    if results_path.resolve() != artifact_path.resolve():
+        shutil.copy2(results_path, artifact_path)
+
+    results_hash = _file_sha256(results_path)
+    artifact_hash = _file_sha256(artifact_path)
+    if results_hash is None or results_hash != artifact_hash:
+        raise RuntimeError(
+            "Required artifact checklist mirror hash mismatch: "
+            f"{results_path} != {artifact_path}"
+        )
+
+
 def _write_artifact_checklist(
     config: Dict[str, Any],
     results_dir: Path,
@@ -293,11 +316,7 @@ def _write_artifact_checklist(
         ),
         "artifacts": rows,
     }
-    _save_result_and_artifact(
-        checklist,
-        results_dir / "required_artifacts_checklist.json",
-        config,
-    )
+    _save_checklist_with_mirror(checklist, results_dir, artifact_dir)
     return checklist
 
 
