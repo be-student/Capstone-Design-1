@@ -26,6 +26,7 @@ from src.monitoring.monitoring_service import (
     ModelMonitoringService,
     MonitoringResult,
     AlertLevel,
+    evaluate_performance_degradation,
 )
 
 
@@ -151,6 +152,104 @@ class TestMonitoringResult:
             timestamp="2024-01-01T00:00:00",
         )
         assert result_drift.has_drift is True
+
+    def test_performance_degradation_serialized(self):
+        """MonitoringResult should include performance degradation payload."""
+        result = MonitoringResult(
+            psi_report={},
+            ks_report={},
+            overall_alert_level=AlertLevel.RED,
+            drifted_features=[],
+            timestamp="2024-01-01T00:00:00",
+            performance_alerts={
+                "performance_degradation": True,
+                "metrics": {
+                    "auc": {
+                        "current": 0.86,
+                        "baseline": 0.91,
+                        "drop": 0.05,
+                        "threshold": 0.03,
+                        "status": "degraded",
+                    }
+                },
+            },
+        )
+        payload = result.to_dict()
+        assert payload["performance_degradation"] is True
+        assert payload["performance_alerts"]["metrics"]["auc"]["drop"] == 0.05
+
+
+class TestPerformanceDegradationEvaluation:
+    """Test threshold-based model performance degradation alerts."""
+
+    def test_degradation_alert_for_auc_precision_recall_drop(self):
+        """Latest metrics below baseline by threshold should alert."""
+        history = pd.DataFrame({
+            "timestamp": [
+                "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z",
+                "2026-05-03T00:00:00Z",
+            ],
+            "model": ["ensemble", "ensemble", "ensemble"],
+            "auc": [0.91, 0.90, 0.86],
+            "precision": [0.82, 0.81, 0.75],
+            "recall": [0.73, 0.72, 0.66],
+        })
+
+        alerts = evaluate_performance_degradation(
+            history,
+            thresholds={"auc": 0.03, "precision": 0.05, "recall": 0.05},
+        )
+
+        assert alerts["performance_degradation"] is True
+        assert alerts["alert_level"] == "red"
+        assert set(alerts["degraded_metrics"]) == {
+            "auc", "precision", "recall",
+        }
+        assert alerts["metrics"]["auc"]["current"] == pytest.approx(0.86)
+        assert alerts["metrics"]["auc"]["baseline"] == pytest.approx(0.91)
+        assert alerts["metrics"]["auc"]["drop"] == pytest.approx(0.05)
+        assert alerts["metrics"]["auc"]["threshold"] == pytest.approx(0.03)
+        assert alerts["metrics"]["auc"]["status"] == "degraded"
+
+    def test_no_alert_when_metrics_stay_within_threshold(self):
+        """Small metric movement should stay OK."""
+        history = pd.DataFrame({
+            "timestamp": [
+                "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z",
+            ],
+            "model_type": ["ensemble", "ensemble"],
+            "auc": [0.91, 0.90],
+            "precision": [0.82, 0.80],
+            "recall": [0.73, 0.72],
+        })
+
+        alerts = evaluate_performance_degradation(history)
+
+        assert alerts["performance_degradation"] is False
+        assert alerts["status"] == "ok"
+        assert alerts["metrics"]["auc"]["status"] == "ok"
+
+    def test_prefers_ensemble_when_multiple_models_exist(self):
+        """Evaluation should select ensemble history by default."""
+        history = pd.DataFrame({
+            "timestamp": [
+                "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z",
+                "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z",
+            ],
+            "model": ["ml_model", "ml_model", "ensemble", "ensemble"],
+            "auc": [0.99, 0.99, 0.95, 0.90],
+            "precision": [0.99, 0.99, 0.84, 0.78],
+            "recall": [0.99, 0.99, 0.75, 0.69],
+        })
+
+        alerts = evaluate_performance_degradation(history)
+
+        assert alerts["model_type"] == "ensemble"
+        assert alerts["performance_degradation"] is True
 
 
 class TestModelMonitoringServiceInit:
@@ -406,6 +505,35 @@ class TestModelMonitoringServiceAlerts:
         # If any feature is yellow or red, callback should fire
         if result.overall_alert_level in (AlertLevel.YELLOW, AlertLevel.RED):
             assert callback.called
+
+    def test_performance_degradation_triggers_alert(
+        self, monitoring_config, sample_reference_data, sample_production_stable
+    ):
+        """Performance degradation should alert even when feature drift is absent."""
+        monitoring_config["monitoring"]["log_to_mlflow"] = False
+        callback = MagicMock()
+        service = ModelMonitoringService(monitoring_config)
+        service.register_alert_callback(callback)
+        service.fit(sample_reference_data)
+        performance_history = pd.DataFrame({
+            "timestamp": [
+                "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z",
+            ],
+            "model": ["ensemble", "ensemble"],
+            "auc": [0.92, 0.86],
+            "precision": [0.83, 0.76],
+            "recall": [0.74, 0.67],
+        })
+
+        result = service.check(
+            sample_production_stable,
+            performance_history=performance_history,
+        )
+
+        assert result.has_performance_degradation is True
+        assert result.overall_alert_level == AlertLevel.RED
+        assert callback.called
 
 
 class TestModelMonitoringServiceHistory:

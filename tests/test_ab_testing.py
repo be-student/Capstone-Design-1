@@ -220,6 +220,64 @@ class TestGroupAssignment:
         )
 
 
+class TestCovariateBalanceCheck:
+    """Test random-assignment balance diagnostics for A/B tests."""
+
+    def test_balance_check_reports_persona_and_numeric_covariates(
+        self, ab_test_framework,
+    ):
+        data = pd.DataFrame({
+            "customer_id": [f"C{i:03d}" for i in range(8)],
+            "group": ["treatment", "control"] * 4,
+            "persona": [
+                "vip", "vip", "regular", "regular",
+                "price_sensitive", "price_sensitive", "new", "new",
+            ],
+            "recency": [10, 11, 20, 19, 5, 6, 30, 31],
+            "frequency": [4, 4, 8, 8, 2, 2, 1, 1],
+            "churn_label": [0, 0, 1, 1, 0, 0, 1, 1],
+        })
+
+        balance = ab_test_framework.compute_balance_check(
+            data,
+            covariates=["recency", "frequency"],
+            categorical_covariates=["persona"],
+        )
+
+        assert set(balance["covariate"]) >= {"persona", "recency", "frequency"}
+        assert "standardized_mean_difference" in balance.columns
+        assert "pass_fail" in balance.columns
+        assert set(balance["pass_fail"]) <= {"pass", "fail"}
+        assert "churn_label" not in set(balance["covariate"])
+
+    def test_balance_check_persists_json_and_csv(self, ab_test_framework, tmp_path):
+        data = pd.DataFrame({
+            "customer_id": [f"C{i:03d}" for i in range(12)],
+            "treatment_group": ["treatment", "control"] * 6,
+            "persona": ["vip", "vip", "regular", "regular"] * 3,
+            "recency": [9, 10, 20, 20, 8, 9, 21, 22, 7, 8, 18, 19],
+            "monetary": [100, 105, 50, 52, 110, 112, 48, 50, 120, 118, 55, 56],
+        })
+
+        payload = ab_test_framework.save_balance_check(
+            data,
+            output_dir=tmp_path,
+            covariates=["recency", "monetary"],
+            categorical_covariates=["persona"],
+            group_col="treatment_group",
+        )
+
+        assert (tmp_path / "ab_test_balance_check.csv").exists()
+        assert (tmp_path / "ab_test_balance_check.json").exists()
+        assert payload["assignment_strategy"] == "random_assignment"
+        assert "confounders independent of treatment" in (
+            payload["confounding_control_rationale"]
+        )
+        assert "threshold_interpretation" in payload
+        assert payload["covariates_checked"]["numeric"] == ["monetary", "recency"]
+        assert payload["summary"]["total_checks"] >= 4
+
+
 # ---------------------------------------------------------------------------
 # Statistical significance tests
 # ---------------------------------------------------------------------------

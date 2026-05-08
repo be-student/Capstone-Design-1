@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/song-eun-u/Documents/github/Capstone-Design-1/mlruns/718160770089759182/45e5753384264584b081a70ccae2536a/artifacts
+end_time: 1778201241808
+entry_point_name: ''
+experiment_id: '718160770089759182'
+lifecycle_stage: active
+run_id: 45e5753384264584b081a70ccae2536a
+run_name: pipeline_mlflow_evidence
+run_uuid: 45e5753384264584b081a70ccae2536a
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1778201241793
+status: 3
+tags: []
+user_id: song-eun-u

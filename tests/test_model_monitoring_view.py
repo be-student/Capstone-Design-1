@@ -236,6 +236,48 @@ class TestRenderModelMonitoring:
         loader.load_model_performance_history.assert_called_once()
         assert not loader.load_mlflow_runs.called
 
+    def test_uses_performance_alerts_loader(self, mock_st, config):
+        """Monitoring page should read performance degradation alerts."""
+        from src.dashboard.monitoring_view import render_model_monitoring
+
+        loader = MagicMock()
+        loader.load_drift_history.return_value = pd.DataFrame()
+        loader.load_model_metrics.return_value = {}
+        loader.load_scoring_throughput.return_value = pd.DataFrame()
+        loader.load_survival_curves.return_value = {}
+        loader.load_survival_data.return_value = pd.DataFrame()
+        loader.load_model_performance_history.return_value = pd.DataFrame({
+            "timestamp": ["2026-05-07T00:00:00Z"],
+            "run_id": ["history_0"],
+            "model_type": ["ensemble"],
+            "auc": [0.91],
+            "precision": [0.82],
+            "recall": [0.73],
+            "f1_score": [0.77],
+            "accuracy": [0.88],
+            "training_time_s": [1.0],
+        })
+        loader.load_performance_alerts.return_value = {
+            "performance_degradation": True,
+            "status": "degraded",
+            "model_type": "ensemble",
+            "degraded_metrics": ["auc"],
+            "metrics": {
+                "auc": {
+                    "current": 0.86,
+                    "baseline": 0.91,
+                    "drop": 0.05,
+                    "threshold": 0.03,
+                    "status": "degraded",
+                }
+            },
+        }
+
+        render_model_monitoring(mock_st, config, loader)
+
+        loader.load_performance_alerts.assert_called_once()
+        mock_st.error.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # Test: Drift Detection Section
@@ -355,6 +397,51 @@ class TestModelPerformanceSection:
         _render_performance_section(mock_st, {}, pd.DataFrame())
         # Should not crash; no plotly chart rendered
         assert mock_st.plotly_chart.call_count == 0
+
+    def test_performance_degradation_alert_table(self, mock_st, sample_model_metrics):
+        """Performance alert payload should render as a threshold table."""
+        from src.dashboard.monitoring_view import (
+            _render_performance_section,
+        )
+        alerts = {
+            "performance_degradation": True,
+            "status": "degraded",
+            "model_type": "ensemble",
+            "degraded_metrics": ["auc", "precision", "recall"],
+            "metrics": {
+                "auc": {
+                    "current": 0.86,
+                    "baseline": 0.91,
+                    "drop": 0.05,
+                    "threshold": 0.03,
+                    "status": "degraded",
+                },
+                "precision": {
+                    "current": 0.75,
+                    "baseline": 0.82,
+                    "drop": 0.07,
+                    "threshold": 0.05,
+                    "status": "degraded",
+                },
+                "recall": {
+                    "current": 0.66,
+                    "baseline": 0.73,
+                    "drop": 0.07,
+                    "threshold": 0.05,
+                    "status": "degraded",
+                },
+            },
+        }
+
+        _render_performance_section(
+            mock_st,
+            sample_model_metrics,
+            pd.DataFrame(),
+            alerts,
+        )
+
+        mock_st.error.assert_called()
+        assert mock_st.dataframe.call_count >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +634,51 @@ class TestDataLoaderIntegration:
         drift = data_loader.load_drift_history()
         valid_levels = {"green", "yellow", "red"}
         assert set(drift["alert_level"].unique()).issubset(valid_levels)
+
+    def test_data_loader_loads_performance_alerts(self, data_loader):
+        """DashboardDataLoader should expose degradation alert fields."""
+        alerts = data_loader.load_performance_alerts()
+        assert isinstance(alerts, dict)
+        assert "performance_degradation" in alerts
+        assert "metrics" in alerts
+        for metric in ["auc", "precision", "recall"]:
+            assert metric in alerts["metrics"]
+            metric_alert = alerts["metrics"][metric]
+            for field in ["current", "baseline", "drop", "threshold", "status"]:
+                assert field in metric_alert
+
+    def test_data_loader_derives_alerts_for_legacy_report(
+        self, tmp_path, config
+    ):
+        """Old monitoring reports should use history CSV as alert fallback."""
+        from src.dashboard.data_loader import DashboardDataLoader
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        (results_dir / "monitoring_report.json").write_text(
+            '{"timestamp": "2026-05-07T00:00:00Z", '
+            '"psi_report": {"feature_alerts": {}}, '
+            '"ks_report": {"feature_alerts": {}}, '
+            '"performance": {"latest": []}}'
+        )
+        pd.DataFrame({
+            "timestamp": [
+                "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z",
+            ],
+            "model": ["ensemble", "ensemble"],
+            "auc": [0.91, 0.86],
+            "precision": [0.82, 0.75],
+            "recall": [0.73, 0.66],
+        }).to_csv(results_dir / "model_performance_history.csv", index=False)
+
+        cfg = dict(config)
+        cfg["dashboard"] = {"results_dir": str(results_dir)}
+        loader = DashboardDataLoader(cfg)
+        alerts = loader.load_performance_alerts()
+
+        assert alerts["performance_degradation"] is True
+        assert alerts["metrics"]["auc"]["status"] == "degraded"
 
     def test_survival_curves_monotonically_decreasing(self, data_loader):
         """Survival probabilities should generally decrease over time."""

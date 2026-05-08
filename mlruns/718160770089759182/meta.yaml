@@ -1,0 +1,6 @@
+artifact_location: file:///Users/song-eun-u/Documents/github/Capstone-Design-1/mlruns/718160770089759182
+creation_time: 1778201241747
+experiment_id: '718160770089759182'
+last_update_time: 1778201241747
+lifecycle_stage: active
+name: churn_prediction_local_evidence

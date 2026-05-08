@@ -12,12 +12,10 @@ integration hooks for MLChurnModel, DLChurnModel, and EnsembleChurnModel.
 All configurable parameters are read from the YAML config dictionary.
 """
 
-import json
 import logging
 import os
 import tempfile
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 import mlflow
@@ -79,7 +77,8 @@ class MLflowTracker:
 
         # Ensure artifact directory exists (only for local filesystem)
         artifact_dir = self.artifact_location
-        if (not artifact_dir.startswith("s3://")
+        if (artifact_dir
+                and not artifact_dir.startswith("s3://")
                 and not artifact_dir.startswith("gs://")
                 and not artifact_dir.startswith("http")):
             os.makedirs(artifact_dir, exist_ok=True)
@@ -104,10 +103,13 @@ class MLflowTracker:
         if experiment is not None:
             exp_id = experiment.experiment_id
         else:
-            exp_id = self.client.create_experiment(
-                name,
-                artifact_location=self.artifact_location,
-            )
+            if self.artifact_location:
+                exp_id = self.client.create_experiment(
+                    name,
+                    artifact_location=self.artifact_location,
+                )
+            else:
+                exp_id = self.client.create_experiment(name)
         self._current_experiment_name = name
         mlflow.set_experiment(name)
         return str(exp_id)

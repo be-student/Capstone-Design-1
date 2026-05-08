@@ -98,6 +98,35 @@ n_treatment = int(round(n * treatment_ratio))  # 50%
 | **처우 (Treatment)** | 전체의 50% | 리텐션 캠페인 수신 (쿠폰/VIP Care/푸시) |
 | **통제 (Control)** | 전체의 50% | 캠페인 없음 (자연 이탈 관찰) |
 
+### 3.3 교란 통제 rationale 및 covariate balance check
+
+**교란 통제 전략:** 본 A/B 테스트는 처우/통제 배정을 random assignment로 수행한다.
+무작위 배정은 관측/비관측 교란 요인이 처우 여부와 독립이 되도록 만들기 때문에, 충분한 표본에서는 페르소나나 가입 시점 같은 사전 공변량(pre-treatment covariate)이 두 그룹에 평균적으로 균형 있게 분포한다.
+따라서 기본 효과 추정은 `treatment churn rate - control churn rate`의 차이와 Z-test를 사용하고, 별도 성향점수 매칭이나 회귀 보정은 필수 전략으로 선택하지 않았다.
+
+**검증 방법:** random assignment가 실제 샘플에서도 균형을 만들었는지 `results/ab_test_balance_check.csv`와 `results/ab_test_balance_check.json`에 persisted evidence로 저장했다.
+수치형 공변량은 standardized mean difference(SMD)를 사용하고, `persona`, `signup_month` 같은 범주형 공변량은 level별 indicator로 확장해 동일하게 SMD를 계산했다.
+
+| 점검 구분 | 공변량/feature | 해석 |
+|----------|----------------|------|
+| 사전 교란 공변량 | `persona`, `signup_month`, `tenure_days` | 교란 통제 PASS/FAIL 판단에 사용 |
+| 주요 RFM/행동 진단 | `recency`, `frequency`, `monetary`, `avg_order_value`, 행동 변화율, 세션/검색/장바구니 feature | 처우 이후 움직일 수 있는 outcome-proximal diagnostic으로 별도 기록 |
+
+**imbalance threshold 해석:** 기본 기준은 `|SMD| <= 0.10`이다.
+사전 교란 공변량에서 `|SMD| <= 0.10`이면 A/B split이 충분히 balanced되어 unadjusted difference-in-means 해석이 가능하다고 본다.
+사전 공변량에서 `|SMD| > 0.10`이 나오면 practical imbalance로 간주하고, 층화 재배정(stratified rerandomization), 회귀 보정(regression adjustment), 또는 해당 공변량별 민감도 분석을 수행해야 한다.
+
+**현재 persisted 결과 요약:**
+
+| 구분 | Checks | Pass | Fail | Max \|SMD\| | 판정 |
+|------|--------|------|------|------------|------|
+| Pre-treatment confounder balance | 11 | 11 | 0 | 0.0257 | PASS |
+| Post-assignment behavior diagnostic | 20 | 15 | 5 | 0.7114 | Diagnostic only |
+
+행동 진단에서 `frequency`, `monetary`, `purchase_cycle_change`, `avg_session_duration`, `search_to_purchase_rate`는 `|SMD| > 0.10`으로 기록되었다.
+이 feature들은 캠페인이 실제로 구매 빈도, 구매액, 검색 후 구매 전환을 움직일 수 있는 처우 이후 지표이므로 교란 통제 실패로 해석하지 않고, 처우 효과 또는 mediation 후보로 별도 해석한다.
+반면 사전 교란 공변량인 페르소나/가입월/tenure는 모두 PASS이므로 현재 A/B 결과의 교란 통제 rationale은 유지된다.
+
 ---
 
 ## 4. 통계 검정 방법
@@ -293,20 +322,24 @@ p-value: 0.0091
    → assign_groups(customer_ids, n_variants=2, seed=42)
    → treatment/control 50:50 분할
 
-3. 캠페인 실행
+3. 교란 통제 balance check
+   → save_balance_check(data, group_col="treatment_group")
+   → persona/공변량 SMD와 pass/fail evidence 저장
+
+4. 캠페인 실행
    → 처우 그룹: 쿠폰/VIP Care/푸시 발송
    → 통제 그룹: 개입 없음
    → 최소 2주 이상 관찰
 
-4. 통계 검정
+5. 통계 검정
    → compute_significance(data, metric="churn_label", alpha=0.05)
    → p-value, 95% CI, 효과 크기 산출
 
-5. 다중 지표 보정
+6. 다중 지표 보정
    → MultipleComparisonCorrection.fdr_bh(p_values)
    → 보정된 p-value 기준 유의성 재판단
 
-6. 의사결정
+7. 의사결정
    → 유의미: 캠페인 전체 롤아웃 결정
    → 비유의미: 캠페인 수정 또는 중단
 ```

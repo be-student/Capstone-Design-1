@@ -15,7 +15,7 @@ Usage:
 
 import os
 import warnings
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -34,6 +34,26 @@ class CustomerDataGenerator:
         personas: List of persona configuration dicts.
         event_types: List of event type strings.
     """
+
+    EVENT_COLUMNS = [
+        "customer_id",
+        "event_type",
+        "event_date",
+        "timestamp",
+        "amount",
+        "session_duration",
+        "marketing_channel",
+        "marketing_response",
+    ]
+    SESSION_EVENT_TYPES = {
+        "page_view",
+        "search",
+        "add_to_cart",
+        "remove_from_cart",
+        "purchase",
+        "coupon_use",
+    }
+    MARKETING_RESPONSES = {"conversion", "no_response", "adverse"}
 
     def __init__(self, config: Dict[str, Any]) -> None:
         """Initialize the generator with configuration.
@@ -224,7 +244,7 @@ class CustomerDataGenerator:
         )
         churned = customers_df.loc[
             customers_df["churn_label"] == 1,
-            ["customer_id", "persona"],
+            ["customer_id", "persona", "signup_date", "treatment_group"],
         ]
         if reactivate_count <= 0 or churned.empty:
             return customers_df, events_df
@@ -233,27 +253,41 @@ class CustomerDataGenerator:
             n=min(reactivate_count, len(churned)),
             random_state=self.seed,
         )
-        persona_order_value = {
-            persona["name"]: float(persona["avg_order_value"])
-            for persona in self.personas
-        }
         event_date = self.end_date - timedelta(days=7)
         rows: List[Dict[str, Any]] = []
         for _, row in selected.iterrows():
+            persona_cfg = self._get_persona_config(row["persona"])
             amount = round(
                 max(
                     1000.0,
-                    persona_order_value.get(row["persona"], 50_000.0) * 0.8,
+                    float(persona_cfg["avg_order_value"]) * 0.8,
                 ),
                 -2,
             )
             timestamp = event_date.replace(hour=10, minute=0, second=0)
+            month_idx = max(
+                0.0,
+                (event_date - pd.Timestamp(row["signup_date"])).days / 30.0,
+            )
+            engagement = persona_cfg["engagement"]
+            decay = persona_cfg["behavior_decay"]
+            session_minutes = engagement["avg_session_minutes"] * max(
+                0.10,
+                (1.0 - decay["session_time_decay"]) ** month_idx,
+            )
+            session_duration = self._sample_session_duration_seconds(
+                session_minutes
+            )
+            is_treatment = row["treatment_group"] == "treatment"
             rows.append(
                 self._make_event(
                     row["customer_id"],
                     "page_view",
                     event_date,
                     timestamp,
+                    session_duration=session_duration,
+                    marketing_channel="push_notification" if is_treatment else None,
+                    marketing_response="no_response" if is_treatment else None,
                 )
             )
             rows.append(
@@ -263,6 +297,9 @@ class CustomerDataGenerator:
                     event_date,
                     timestamp,
                     amount=amount,
+                    session_duration=session_duration,
+                    marketing_channel="coupon" if is_treatment else None,
+                    marketing_response="conversion" if is_treatment else None,
                 )
             )
 
@@ -314,10 +351,7 @@ class CustomerDataGenerator:
 
         events_df = pd.DataFrame(all_events)
         if len(events_df) == 0:
-            events_df = pd.DataFrame(columns=[
-                "customer_id", "event_type", "event_date",
-                "timestamp", "amount",
-            ])
+            events_df = pd.DataFrame(columns=self.EVENT_COLUMNS)
 
         return events_df.sort_values(
             ["customer_id", "timestamp"]

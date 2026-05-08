@@ -8,6 +8,7 @@ drift exceeds configurable thresholds.
 This service combines:
 - PSI (Population Stability Index) drift detection for numerical features
 - KS (Kolmogorov-Smirnov) test for numerical features
+- Model performance degradation detection for AUC/Precision/Recall
 - Configurable alert thresholds and callback mechanism
 - MLflow integration for drift metric logging
 - History tracking for monitoring over time
@@ -30,6 +31,13 @@ from src.monitoring.ks_drift import KSDriftDetector, KSDriftReport
 
 logger = logging.getLogger(__name__)
 
+PERFORMANCE_METRICS = ("auc", "precision", "recall")
+DEFAULT_PERFORMANCE_DROP_THRESHOLDS = {
+    "auc": 0.03,
+    "precision": 0.05,
+    "recall": 0.05,
+}
+
 
 def serialize_monitoring_report(report: Any) -> Dict[str, Any]:
     """Normalize drift report objects or payloads for JSON/report consumers."""
@@ -45,6 +53,263 @@ def serialize_monitoring_report(report: Any) -> Dict[str, Any]:
         normalized.setdefault("summary", {})
         return normalized
     raise TypeError(f"Unsupported report type: {type(report).__name__}")
+
+
+def _performance_thresholds_from_config(
+    config_or_thresholds: Optional[Dict[str, Any]],
+) -> Dict[str, float]:
+    """Read performance degradation thresholds from config or metric mapping."""
+    thresholds = dict(DEFAULT_PERFORMANCE_DROP_THRESHOLDS)
+    if not config_or_thresholds:
+        return thresholds
+
+    candidates: List[Dict[str, Any]] = []
+    if any(metric in config_or_thresholds for metric in PERFORMANCE_METRICS):
+        candidates.append(config_or_thresholds)
+
+    monitoring_cfg = config_or_thresholds.get("monitoring", {})
+    if isinstance(monitoring_cfg, dict):
+        for key in [
+            "performance_thresholds",
+            "performance_degradation_thresholds",
+        ]:
+            if isinstance(monitoring_cfg.get(key), dict):
+                candidates.append(monitoring_cfg[key])
+        perf_cfg = monitoring_cfg.get("performance_degradation", {})
+        if isinstance(perf_cfg, dict):
+            candidates.append(perf_cfg.get("thresholds", perf_cfg))
+
+    for key in [
+        "performance_thresholds",
+        "performance_degradation_thresholds",
+        "performance_degradation",
+    ]:
+        section = config_or_thresholds.get(key, {})
+        if isinstance(section, dict):
+            candidates.append(section.get("thresholds", section))
+
+    for candidate in candidates:
+        for metric in PERFORMANCE_METRICS:
+            if metric in candidate:
+                thresholds[metric] = float(candidate[metric])
+    return thresholds
+
+
+@dataclass
+class PerformanceMetricAlert:
+    """Threshold comparison for one model performance metric."""
+
+    metric: str
+    current: float
+    baseline: float
+    drop: float
+    threshold: float
+    status: str
+    current_timestamp: Optional[str] = None
+    baseline_timestamp: Optional[str] = None
+
+    @property
+    def is_degraded(self) -> bool:
+        """Return True when the metric drop crosses its alert threshold."""
+        return self.status == "degraded"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return JSON-serializable metric alert payload."""
+        return {
+            "metric": self.metric,
+            "current": self.current,
+            "baseline": self.baseline,
+            "drop": self.drop,
+            "threshold": self.threshold,
+            "status": self.status,
+            "is_degraded": self.is_degraded,
+            "current_timestamp": self.current_timestamp,
+            "baseline_timestamp": self.baseline_timestamp,
+        }
+
+
+def evaluate_performance_degradation(
+    performance_history: Optional[pd.DataFrame],
+    thresholds: Optional[Dict[str, Any]] = None,
+    model_type: Optional[str] = None,
+    metrics: tuple[str, ...] = PERFORMANCE_METRICS,
+    baseline_strategy: str = "best",
+) -> Dict[str, Any]:
+    """Compare latest AUC/Precision/Recall against historical baselines.
+
+    Args:
+        performance_history: Time series with timestamp, model/model_type,
+            auc/auc_roc, precision, and recall columns.
+        thresholds: Metric drop thresholds. Defaults are AUC 0.03,
+            Precision 0.05, and Recall 0.05.
+        model_type: Optional model filter. When omitted, the ensemble model is
+            preferred if present, otherwise the latest model in the history.
+        metrics: Metrics to evaluate.
+        baseline_strategy: ``"best"`` compares with the best previous value;
+            ``"first"`` compares with the first historical value.
+
+    Returns:
+        Dict containing metric-level current/baseline/drop/threshold/status
+        fields plus aggregate performance_degradation status.
+    """
+    thresholds = _performance_thresholds_from_config(thresholds)
+    empty = {
+        "enabled": True,
+        "status": "insufficient_history",
+        "alert_level": AlertLevel.GREEN.value,
+        "performance_degradation": False,
+        "model_type": model_type,
+        "baseline_strategy": baseline_strategy,
+        "thresholds": thresholds,
+        "metrics": {},
+        "degraded_metrics": [],
+    }
+    if performance_history is None or performance_history.empty:
+        return empty
+
+    history = performance_history.copy()
+    if "model_type" not in history.columns and "model" in history.columns:
+        history = history.rename(columns={"model": "model_type"})
+    if "auc" not in history.columns and "auc_roc" in history.columns:
+        history["auc"] = history["auc_roc"]
+
+    if "model_type" in history.columns:
+        available_models = [str(m) for m in history["model_type"].dropna().unique()]
+        if model_type is None:
+            if "ensemble" in available_models:
+                model_type = "ensemble"
+            else:
+                latest_idx = _latest_history_index(history)
+                model_type = str(history.loc[latest_idx, "model_type"])
+        history = history[history["model_type"].astype(str) == str(model_type)]
+    else:
+        model_type = model_type or "all"
+
+    if len(history) < 2:
+        empty["model_type"] = model_type
+        return empty
+
+    history = _sort_performance_history(history)
+    current_row = history.iloc[-1]
+    previous = history.iloc[:-1]
+    current_timestamp = _string_value(current_row.get("timestamp"))
+
+    metric_alerts: Dict[str, Dict[str, Any]] = {}
+    degraded_metrics: List[str] = []
+    warning_metrics: List[str] = []
+
+    for metric in metrics:
+        if metric not in history.columns:
+            continue
+        current = _safe_float(current_row.get(metric))
+        if current is None:
+            continue
+
+        previous_metric = pd.to_numeric(previous[metric], errors="coerce")
+        previous_metric = previous_metric.dropna()
+        if previous_metric.empty:
+            continue
+
+        if baseline_strategy == "first":
+            baseline_idx = previous_metric.index[0]
+        else:
+            baseline_idx = previous_metric.idxmax()
+        baseline = _safe_float(history.loc[baseline_idx, metric])
+        if baseline is None:
+            continue
+
+        drop = max(0.0, baseline - current)
+        threshold = float(thresholds.get(metric, 0.0))
+        if drop >= threshold:
+            status = "degraded"
+            degraded_metrics.append(metric)
+        elif drop >= threshold * 0.5 and drop > 0:
+            status = "warning"
+            warning_metrics.append(metric)
+        else:
+            status = "ok"
+
+        alert = PerformanceMetricAlert(
+            metric=metric,
+            current=current,
+            baseline=baseline,
+            drop=drop,
+            threshold=threshold,
+            status=status,
+            current_timestamp=current_timestamp,
+            baseline_timestamp=_string_value(
+                history.loc[baseline_idx].get("timestamp")
+            ),
+        )
+        metric_alerts[metric] = alert.to_dict()
+
+    if degraded_metrics:
+        overall_status = "degraded"
+        alert_level = AlertLevel.RED.value
+    elif warning_metrics:
+        overall_status = "warning"
+        alert_level = AlertLevel.YELLOW.value
+    else:
+        overall_status = "ok" if metric_alerts else "insufficient_history"
+        alert_level = AlertLevel.GREEN.value
+
+    return {
+        "enabled": True,
+        "status": overall_status,
+        "alert_level": alert_level,
+        "performance_degradation": bool(degraded_metrics),
+        "model_type": model_type,
+        "baseline_strategy": baseline_strategy,
+        "thresholds": thresholds,
+        "metrics": metric_alerts,
+        "degraded_metrics": degraded_metrics,
+        "warning_metrics": warning_metrics,
+        "current_timestamp": current_timestamp,
+    }
+
+
+def _sort_performance_history(history: pd.DataFrame) -> pd.DataFrame:
+    """Return performance history ordered by timestamp when available."""
+    ordered = history.copy()
+    ordered["_row_order"] = range(len(ordered))
+    if "timestamp" in ordered.columns:
+        ordered["_timestamp_sort"] = pd.to_datetime(
+            ordered["timestamp"], errors="coerce", utc=True,
+        )
+        ordered = ordered.sort_values(
+            ["_timestamp_sort", "_row_order"],
+            na_position="first",
+        )
+        return ordered.drop(columns=["_timestamp_sort", "_row_order"])
+    return ordered.sort_values("_row_order").drop(columns=["_row_order"])
+
+
+def _latest_history_index(history: pd.DataFrame) -> Any:
+    """Return index of the latest row in a performance history frame."""
+    if "timestamp" not in history.columns:
+        return history.index[-1]
+    sortable = pd.to_datetime(history["timestamp"], errors="coerce", utc=True)
+    if sortable.notna().any():
+        return sortable.idxmax()
+    return history.index[-1]
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Convert a value to finite float, returning None when unavailable."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(result):
+        return None
+    return result
+
+
+def _string_value(value: Any) -> Optional[str]:
+    """Convert non-null scalar values to strings for JSON payloads."""
+    if value is None or pd.isna(value):
+        return None
+    return str(value)
 
 
 class AlertLevel(Enum):
@@ -78,11 +343,17 @@ class MonitoringResult:
     overall_alert_level: AlertLevel
     drifted_features: List[str]
     timestamp: str
+    performance_alerts: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_drift(self) -> bool:
         """Return True if any features are drifted."""
         return len(self.drifted_features) > 0
+
+    @property
+    def has_performance_degradation(self) -> bool:
+        """Return True when AUC/Precision/Recall degradation was detected."""
+        return bool(self.performance_alerts.get("performance_degradation"))
 
     def to_dict(self) -> Dict[str, Any]:
         """Return JSON-serializable dict representation."""
@@ -93,6 +364,8 @@ class MonitoringResult:
             "drifted_features": self.drifted_features,
             "timestamp": self.timestamp,
             "has_drift": self.has_drift,
+            "performance_alerts": self.performance_alerts,
+            "performance_degradation": self.has_performance_degradation,
         }
 
 
@@ -140,6 +413,9 @@ class ModelMonitoringService:
         self.alert_on_yellow = mon_cfg.get("alert_on_yellow", False)
         self.alert_on_red = mon_cfg.get("alert_on_red", True)
         self.log_to_mlflow = mon_cfg.get("log_to_mlflow", True)
+        self.performance_thresholds = _performance_thresholds_from_config(
+            config
+        )
 
         # MLflow config
         self._mlflow_cfg = config.get("mlflow", {})
@@ -179,14 +455,20 @@ class ModelMonitoringService:
         self.is_fitted = True
         return self
 
-    def check(self, production: pd.DataFrame) -> MonitoringResult:
-        """Run drift detection on production data.
+    def check(
+        self,
+        production: pd.DataFrame,
+        performance_history: Optional[pd.DataFrame] = None,
+    ) -> MonitoringResult:
+        """Run drift and optional performance degradation detection.
 
         Executes both PSI and KS checks, determines overall alert level,
         logs results to MLflow (if enabled), and triggers alert callbacks.
 
         Args:
             production: DataFrame of production (scoring) feature values.
+            performance_history: Optional model performance time series used
+                to compare latest AUC/Precision/Recall against baselines.
 
         Returns:
             MonitoringResult with detailed drift analysis.
@@ -249,6 +531,20 @@ class ModelMonitoringService:
                       and max_alert != AlertLevel.RED):
                     max_alert = AlertLevel.YELLOW
 
+        performance_alerts: Dict[str, Any] = {}
+        if performance_history is not None:
+            performance_alerts = evaluate_performance_degradation(
+                performance_history,
+                thresholds=self.performance_thresholds,
+            )
+            if performance_alerts.get("alert_level") == AlertLevel.RED.value:
+                max_alert = AlertLevel.RED
+            elif (
+                performance_alerts.get("alert_level") == AlertLevel.YELLOW.value
+                and max_alert != AlertLevel.RED
+            ):
+                max_alert = AlertLevel.YELLOW
+
         # Build result
         result = MonitoringResult(
             psi_report=psi_report_dict,
@@ -256,6 +552,7 @@ class ModelMonitoringService:
             overall_alert_level=max_alert,
             drifted_features=drifted_features,
             timestamp=timestamp,
+            performance_alerts=performance_alerts,
         )
 
         # Log to MLflow
@@ -333,10 +630,31 @@ class ModelMonitoringService:
             mlflow.log_metric(
                 "num_drifted_features", len(result.drifted_features)
             )
+            for metric, alert in result.performance_alerts.get(
+                "metrics", {}
+            ).items():
+                for field_name in ["current", "baseline", "drop", "threshold"]:
+                    value = _safe_float(alert.get(field_name))
+                    if value is not None:
+                        mlflow.log_metric(
+                            f"performance_{metric}_{field_name}", value
+                        )
 
             # Log tags
             mlflow.set_tag("drift_alert_level", result.overall_alert_level.value)
             mlflow.set_tag("has_drift", str(result.has_drift))
+            mlflow.set_tag(
+                "performance_degradation",
+                str(result.has_performance_degradation),
+            )
+            degraded_metrics = result.performance_alerts.get(
+                "degraded_metrics", []
+            )
+            if degraded_metrics:
+                mlflow.set_tag(
+                    "performance_degraded_metrics",
+                    ",".join(degraded_metrics),
+                )
             if result.drifted_features:
                 mlflow.set_tag(
                     "drifted_features", ",".join(result.drifted_features)

@@ -30,7 +30,6 @@ import argparse
 import hashlib
 import json
 import logging
-import os
 import shutil
 import subprocess
 import sys
@@ -50,7 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.pipeline.artifact_validation import validate_cohort_artifacts
+from src.pipeline.artifact_validation import validate_cohort_artifacts  # noqa: E402
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "simulator_config.yaml"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 DEFAULT_RESULTS_DIR = PROJECT_ROOT / "results"
@@ -886,7 +885,7 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
     """Train ML/DL churn prediction models and generate SHAP plots."""
     from src.models import (MLChurnModel, DLChurnModel,
                              EnsembleChurnModel, time_based_split, ShapExplainer,
-                             DLTrainer)
+                             DLTrainer, MLflowTracker)
     from src.models.churn_model import analyze_threshold
 
     data_dir, results_dir, models_dir = _resolve_dirs(args)
@@ -1006,9 +1005,20 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
     results["dl_model"] = _metric_aliases(dl_m)
     dl.save(str(models_dir / "dl_churn_model.pt"))
     logger.info("DL AUC-ROC: %.4f", dl_m.get("auc_roc", 0))
+    model_manifest_path = models_dir / "model_artifacts_manifest.json"
+    if model_manifest_path.exists():
+        try:
+            results["model_artifacts"] = json.loads(
+                model_manifest_path.read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            logger.warning("Model artifact manifest is not valid JSON: %s", exc)
 
     # Ensemble
     logger.info("Building ensemble...")
+    ens = EnsembleChurnModel(config)
+    ens.ml_model = ml
+    ens.dl_model = dl
     ml_probs = _safe_predict_proba(ml, X_te)
     dl_probs = np.asarray(dl_result.get("test_probabilities", []), dtype=float) \
         if "dl_result" in locals() else np.array([])
@@ -1023,9 +1033,6 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
         ensemble_ids = dl_test_ids
         ensemble_y = dl_y_test
     else:
-        ens = EnsembleChurnModel(config)
-        ens.ml_model = ml
-        ens.dl_model = dl
         ens_probs = _safe_predict_proba(ens, X_te)
         ens_m = _binary_metrics(y_test, ens_probs)
         ensemble_ids = test_ids
@@ -1151,8 +1158,145 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
         {"run": "current", "model": "ensemble", **results["ensemble"]},
     ])
     _save_result_and_artifact(perf_row, results_dir / "model_performance_history.csv", config)
+    try:
+        tracker = MLflowTracker(config)
+        results["mlflow_runs"] = _log_training_runs_to_mlflow(
+            tracker=tracker,
+            ml_model=ml,
+            dl_model=dl,
+            ensemble_model=ens,
+            ml_metrics=results["ml_model"],
+            dl_metrics=results["dl_model"],
+            ensemble_metrics=results["ensemble"],
+            dl_history=results.get("dl_training", {}).get("history", []),
+            artifact_paths=[
+                model_manifest_path,
+                results_dir / "model_metrics.json",
+                results_dir / "model_performance_history.csv",
+            ],
+        )
+    except Exception as exc:
+        logger.warning("MLflow training logging failed: %s", exc)
+        results["mlflow_runs"] = {
+            "status": "failed",
+            "error": str(exc),
+        }
     results["status"] = "completed"
+    _save_result_and_artifact(results, results_dir / "model_metrics.json", config)
     return results
+
+
+def _log_training_runs_to_mlflow(
+    tracker: Any,
+    ml_model: Any,
+    dl_model: Any,
+    ensemble_model: Any,
+    ml_metrics: Dict[str, float],
+    dl_metrics: Dict[str, float],
+    ensemble_metrics: Dict[str, float],
+    dl_history: List[Dict[str, Any]],
+    artifact_paths: List[Path],
+) -> Dict[str, Any]:
+    """Create concrete MLflow runs for train-mode model evidence."""
+    run_ids = {
+        "ml_model": tracker.auto_log_ml_model(
+            model=ml_model,
+            metrics=ml_metrics,
+            run_name="ml_churn_training",
+        ),
+        "dl_model": tracker.auto_log_dl_model(
+            model=dl_model,
+            metrics=dl_metrics,
+            training_history=dl_history,
+            run_name="dl_churn_training",
+        ),
+        "ensemble": tracker.auto_log_ensemble(
+            ensemble_model=ensemble_model,
+            metrics=ensemble_metrics,
+            run_name="ensemble_churn_training",
+        ),
+    }
+
+    tracker.create_experiment(tracker.default_experiment_name)
+    artifact_run_id = tracker.start_run(run_name="training_artifact_evidence")
+    logged_artifacts = 0
+    try:
+        tracker.log_tags({
+            "pipeline_stage": "training_artifacts",
+            "run_status": "completed",
+        })
+        for path in artifact_paths:
+            if path.exists():
+                tracker.log_artifact(str(path), artifact_path="training_evidence")
+                logged_artifacts += 1
+        tracker.log_metrics({"logged_artifact_count": float(logged_artifacts)})
+    finally:
+        tracker.end_run()
+    run_ids["training_artifacts"] = artifact_run_id
+
+    return {
+        "status": "completed",
+        "tracking_uri": tracker.tracking_uri,
+        "experiment_name": tracker.default_experiment_name,
+        "run_ids": run_ids,
+        "logged_artifact_count": logged_artifacts,
+    }
+
+
+def run_mlflow_logging(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    """Persist run_all MLflow evidence as a real local tracking run."""
+    from src.models import MLflowTracker
+
+    _, results_dir, models_dir = _resolve_dirs(args)
+    tracker = MLflowTracker(config)
+    tracker.create_experiment(tracker.default_experiment_name)
+    run_id = tracker.start_run(run_name="pipeline_mlflow_evidence")
+
+    artifact_candidates = [
+        results_dir / "model_metrics.json",
+        results_dir / "model_performance_history.csv",
+        results_dir / "required_artifacts_checklist.json",
+        models_dir / "model_artifacts_manifest.json",
+    ]
+    artifact_candidates.extend(
+        sorted(models_dir.glob("*_v*.*"))
+    )
+
+    logged_artifacts = 0
+    try:
+        tracker.log_tags({
+            "pipeline_stage": "mlflow_logging",
+            "run_status": "completed",
+            "evidence_source": "run_all",
+        })
+        tracker.log_params({
+            "results_dir": str(results_dir),
+            "models_dir": str(models_dir),
+        })
+        for path in artifact_candidates:
+            if path.exists() and path.is_file():
+                artifact_path = (
+                    "model_artifacts"
+                    if path.parent == models_dir
+                    else "pipeline_results"
+                )
+                tracker.log_artifact(str(path), artifact_path=artifact_path)
+                logged_artifacts += 1
+        tracker.log_metrics({"logged_artifact_count": float(logged_artifacts)})
+    finally:
+        tracker.end_run()
+
+    return {
+        "mode": "mlflow_logging",
+        "status": "completed",
+        "tracking_uri": tracker.tracking_uri,
+        "experiment_name": tracker.default_experiment_name,
+        "run_id": run_id,
+        "logged_artifact_count": logged_artifacts,
+    }
 
 
 def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
@@ -2378,6 +2522,17 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
                 reasons.append(
                     f"{artifact}_row_count_{row_count}_expected_{expected_rows}"
                 )
+        mlflow_stage = stages.get("mlflow_logging", {})
+        if mlflow_stage.get("status") == "completed":
+            summary = (
+                mlflow_stage.get("metadata", {})
+                .get("result_summary", {})
+            )
+            if (
+                summary.get("note") == "handled by prior step"
+                or "run_id" not in summary
+            ):
+                reasons.append("mlflow_logging_evidence_missing")
         return reasons
 
     stale_reasons = _stale_completed_stage_reasons(state)
@@ -2416,7 +2571,7 @@ def run_all(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         ("ab_testing", run_ab_test),
         ("survival_analysis", run_survival),
         ("scoring_api_setup", run_monitor),        # runs PSI + KS drift
-        ("mlflow_logging", _noop),                 # already done in scoring_api_setup
+        ("mlflow_logging", run_mlflow_logging),
     ]
     for step_name, handler_fn in step_handlers:
         runner.register_step(step_name, handler_fn)

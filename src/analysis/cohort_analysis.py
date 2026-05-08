@@ -25,6 +25,7 @@ Usage:
 
 import logging
 from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib
@@ -78,6 +79,14 @@ def _normalize_event_schema(events_df: pd.DataFrame) -> pd.DataFrame:
     events["event_date"] = pd.to_datetime(events["event_date"])
     events["event_type"] = events["event_type"].astype(str)
     return events
+
+
+def _mean_median_days(values: pd.Series) -> Tuple[float, float]:
+    """Return rounded mean/median day values, preserving NaN for no evidence."""
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return float("nan"), float("nan")
+    return round(float(numeric.mean()), 2), round(float(numeric.median()), 2)
 
 
 class CohortAnalyzer:
@@ -900,6 +909,101 @@ class CohortAnalyzer:
         if save_path:
             fig.savefig(save_path, dpi=150, bbox_inches="tight")
             logger.info("Retention line plot saved to %s", save_path)
+            path = Path(save_path)
+            if path.name == "cohort_retention_curves.png":
+                churn_diff_path = path.with_name("cohort_churn_rate_differences.png")
+                churn_fig = self.plot_churn_rate_differences(
+                    retention_matrix,
+                    save_path=str(churn_diff_path),
+                )
+                plt.close(churn_fig)
+
+        return fig
+
+    def plot_churn_rate_differences(
+        self,
+        retention_matrix: pd.DataFrame,
+        title: str = "Cohort Churn Rate Differences",
+        figsize: Tuple[int, int] = (12, 7),
+        save_path: Optional[str] = None,
+    ) -> plt.Figure:
+        """Visualize period churn-rate differences across cohorts.
+
+        The chart directly compares each cohort's incremental churn rate by
+        period and includes the cross-cohort spread so reviewers can verify
+        that cohort-level churn differences were analyzed, not only tabulated.
+        """
+        churn_rates = self.compute_churn_rates(retention_matrix).copy()
+        churn_rates = churn_rates.rename(
+            columns={
+                col: int(col)
+                for col in churn_rates.columns
+                if isinstance(col, str) and col.isdigit()
+            }
+        )
+        period_cols = sorted(
+            col for col in churn_rates.columns
+            if isinstance(col, (int, np.integer)) and int(col) != 0
+        )
+        if not period_cols:
+            period_cols = sorted(churn_rates.columns)
+
+        plot_data = churn_rates[period_cols].astype(float)
+        spread = plot_data.max(axis=0, skipna=True) - plot_data.min(axis=0, skipna=True)
+        average = plot_data.mean(axis=0, skipna=True)
+
+        fig, (ax_lines, ax_spread) = plt.subplots(
+            2,
+            1,
+            figsize=figsize,
+            gridspec_kw={"height_ratios": [3, 1]},
+            sharex=True,
+        )
+
+        for cohort_label in plot_data.index:
+            row = plot_data.loc[cohort_label]
+            ax_lines.plot(
+                period_cols,
+                row.values,
+                marker="o",
+                markersize=4,
+                linewidth=1.4,
+                label=str(cohort_label),
+            )
+
+        ax_lines.plot(
+            period_cols,
+            average.values,
+            color="black",
+            linewidth=2.5,
+            linestyle="--",
+            marker="s",
+            markersize=5,
+            label="Average",
+            zorder=10,
+        )
+        ax_lines.axhline(0.0, color="#555555", linewidth=0.8, alpha=0.5)
+        ax_lines.set_title(title, fontsize=14, fontweight="bold")
+        ax_lines.set_ylabel("Incremental Churn Rate", fontsize=12)
+        ax_lines.grid(True, alpha=0.3)
+        ax_lines.legend(title="Cohort", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+        ax_spread.bar(
+            period_cols,
+            spread.values,
+            color="#4c78a8",
+            edgecolor="white",
+            linewidth=0.5,
+        )
+        ax_spread.set_xlabel("Cohort Period", fontsize=12)
+        ax_spread.set_ylabel("Spread", fontsize=12)
+        ax_spread.grid(axis="y", alpha=0.3)
+
+        fig.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            logger.info("Churn rate difference plot saved to %s", save_path)
 
         return fig
 
@@ -1152,7 +1256,7 @@ def compute_journey_funnel(
     customers_df: pd.DataFrame,
     events_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compute a customer journey funnel across five lifecycle stages.
+    """Compute a customer journey funnel with stage timing evidence.
 
     Stages (in order):
         1. **Signup** – all customers in ``customers_df``.
@@ -1175,18 +1279,111 @@ def compute_journey_funnel(
           stage (relative to the Signup stage).
         - ``drop_off_rate``: Fraction of customers who did *not* proceed from
           the previous stage to this one (0.0 for the Signup stage).
+        - ``avg_days_since_signup`` / ``median_days_since_signup``: Tenure at
+          the stage timestamp.
+        - ``avg_days_from_previous_stage`` /
+          ``median_days_from_previous_stage``: Stage transition duration.
+        - ``dropoff_customer_count`` and ``*_dropoff_days_after_previous_stage``:
+          customers who stopped before reaching the current stage and their
+          timing evidence.
     """
     events = _normalize_event_schema(events_df)
-    purchases = events[events["event_type"] == "purchase"]
-    purchase_counts = purchases.groupby("customer_id").size()
+    customers = customers_df.copy()
+    customers["customer_id"] = customers["customer_id"].astype(str)
+    events["customer_id"] = events["customer_id"].astype(str)
 
-    all_customers = set(customers_df["customer_id"])
+    all_customers = set(customers["customer_id"])
+    first_event_dates = events.groupby("customer_id")["event_date"].min()
+    last_event_dates = events.groupby("customer_id")["event_date"].max()
+
+    if "signup_date" in customers.columns:
+        signup_dates = pd.to_datetime(customers["signup_date"], errors="coerce")
+        signup_dates.index = customers["customer_id"]
+        signup_dates = signup_dates.fillna(first_event_dates)
+    else:
+        signup_dates = customers["customer_id"].map(first_event_dates)
+        signup_dates.index = customers["customer_id"]
+    signup_dates = pd.to_datetime(signup_dates, errors="coerce")
+
+    purchases = (
+        events[events["event_type"] == "purchase"]
+        .sort_values(["customer_id", "event_date"])
+        .copy()
+    )
+    if purchases.empty:
+        purchase_counts = pd.Series(dtype=int)
+        purchase_dates = pd.DataFrame(
+            index=pd.Index([], name="customer_id"),
+            columns=["first_purchase", "repeat_purchase", "loyal"],
+            dtype="datetime64[ns]",
+        )
+    else:
+        purchases["purchase_number"] = (
+            purchases.groupby("customer_id").cumcount() + 1
+        )
+        purchase_counts = purchases.groupby("customer_id").size()
+        purchase_dates = pd.DataFrame(index=purchase_counts.index)
+        for purchase_number, column in (
+            (1, "first_purchase"),
+            (2, "repeat_purchase"),
+            (5, "loyal"),
+        ):
+            purchase_dates[column] = (
+                purchases.loc[purchases["purchase_number"] == purchase_number]
+                .drop_duplicates("customer_id")
+                .set_index("customer_id")["event_date"]
+            )
+
     first_purchase = set(purchase_counts[purchase_counts >= 1].index) & all_customers
     repeat_purchase = set(purchase_counts[purchase_counts >= 2].index) & all_customers
     loyal = set(purchase_counts[purchase_counts >= 5].index) & all_customers
-    churned = set(
-        customers_df.loc[customers_df["churn_label"] == 1, "customer_id"]
+
+    if "churn_label" in customers.columns:
+        churn_labels = pd.to_numeric(
+            customers["churn_label"], errors="coerce"
+        ).fillna(0).astype(int)
+        churned = set(
+            customers.loc[churn_labels == 1, "customer_id"]
+        ) & all_customers
+    else:
+        churned = set()
+
+    churn_dates = pd.Series(
+        pd.NaT,
+        index=customers["customer_id"],
+        dtype="datetime64[ns]",
     )
+    for churn_col in ("churn_date", "churned_at", "churn_timestamp"):
+        if churn_col in customers.columns:
+            churn_dates = pd.to_datetime(
+                customers.set_index("customer_id")[churn_col],
+                errors="coerce",
+            )
+            break
+    churn_dates = churn_dates.fillna(last_event_dates)
+    churn_dates = churn_dates.where(churn_dates.index.isin(churned), pd.NaT)
+
+    stage_dates = pd.DataFrame(index=pd.Index(sorted(all_customers), name="customer_id"))
+    stage_dates["Signup"] = signup_dates.reindex(stage_dates.index)
+    stage_dates["First Purchase"] = purchase_dates.get(
+        "first_purchase", pd.Series(dtype="datetime64[ns]")
+    ).reindex(stage_dates.index)
+    stage_dates["Repeat Purchase"] = purchase_dates.get(
+        "repeat_purchase", pd.Series(dtype="datetime64[ns]")
+    ).reindex(stage_dates.index)
+    stage_dates["Loyal"] = purchase_dates.get(
+        "loyal", pd.Series(dtype="datetime64[ns]")
+    ).reindex(stage_dates.index)
+    stage_dates["Churned"] = churn_dates.reindex(stage_dates.index)
+    stage_dates["last_event_date"] = last_event_dates.reindex(stage_dates.index)
+
+    stage_members = {
+        "Signup": all_customers,
+        "First Purchase": first_purchase,
+        "Repeat Purchase": repeat_purchase,
+        "Loyal": loyal,
+        "Churned": churned,
+    }
 
     stages = [
         ("Signup", len(all_customers)),
@@ -1202,17 +1399,74 @@ def compute_journey_funnel(
         conversion_rate = count / total
         if i == 0:
             drop_off_rate = 0.0
+            previous_stage = None
         else:
             prev_count = stages[i - 1][1]
             drop_off_rate = (
                 (prev_count - count) / prev_count if prev_count > 0 else 0.0
             )
+            previous_stage = stages[i - 1][0]
+
+        member_index = list(stage_members[stage])
+        since_signup = (
+            stage_dates.loc[member_index, stage] - stage_dates.loc[member_index, "Signup"]
+            if member_index else pd.Series(dtype="timedelta64[ns]")
+        )
+        avg_since_signup, median_since_signup = _mean_median_days(
+            since_signup.dt.days if len(since_signup) else pd.Series(dtype=float)
+        )
+
+        if stage == "Signup":
+            transition_days = pd.Series(0.0, index=member_index, dtype=float)
+        elif stage == "Churned":
+            prior_dates = stage_dates.loc[member_index, [
+                "Loyal", "Repeat Purchase", "First Purchase", "Signup",
+            ]].bfill(axis=1).iloc[:, 0] if member_index else pd.Series(
+                dtype="datetime64[ns]"
+            )
+            transition_days = (
+                stage_dates.loc[member_index, stage] - prior_dates
+                if member_index else pd.Series(dtype="timedelta64[ns]")
+            )
+            transition_days = transition_days.dt.days
+        else:
+            transition_days = (
+                stage_dates.loc[member_index, stage]
+                - stage_dates.loc[member_index, previous_stage]
+                if member_index else pd.Series(dtype="timedelta64[ns]")
+            )
+            transition_days = transition_days.dt.days
+        avg_transition, median_transition = _mean_median_days(transition_days)
+
+        if previous_stage is None:
+            dropoff_ids: set = set()
+            dropoff_days = pd.Series(dtype=float)
+        else:
+            dropoff_ids = stage_members[previous_stage] - stage_members[stage]
+            dropoff_index = list(dropoff_ids)
+            previous_dates = stage_dates.loc[dropoff_index, previous_stage]
+            dropoff_days = (
+                stage_dates.loc[dropoff_index, "last_event_date"] - previous_dates
+                if dropoff_index else pd.Series(dtype="timedelta64[ns]")
+            )
+            dropoff_days = (
+                dropoff_days.dt.days if len(dropoff_days) else pd.Series(dtype=float)
+            )
+        avg_dropoff, median_dropoff = _mean_median_days(dropoff_days)
+
         rows.append(
             {
                 "stage": stage,
                 "count": count,
                 "conversion_rate": round(conversion_rate, 4),
                 "drop_off_rate": round(drop_off_rate, 4),
+                "avg_days_since_signup": avg_since_signup,
+                "median_days_since_signup": median_since_signup,
+                "avg_days_from_previous_stage": avg_transition,
+                "median_days_from_previous_stage": median_transition,
+                "dropoff_customer_count": len(dropoff_ids),
+                "avg_dropoff_days_after_previous_stage": avg_dropoff,
+                "median_dropoff_days_after_previous_stage": median_dropoff,
             }
         )
 

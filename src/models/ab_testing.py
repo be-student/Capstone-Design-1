@@ -326,6 +326,305 @@ class ABTestFramework:
         return df
 
     # ------------------------------------------------------------------
+    # Covariate/persona balance checks
+    # ------------------------------------------------------------------
+
+    def compute_balance_check(
+        self,
+        data: pd.DataFrame,
+        covariates: Optional[List[str]] = None,
+        categorical_covariates: Optional[List[str]] = None,
+        group_col: str = "group",
+        treatment_label: str = "treatment",
+        control_label: str = "control",
+        imbalance_threshold: float = 0.10,
+        covariate_roles: Optional[Dict[str, str]] = None,
+    ) -> pd.DataFrame:
+        """Check treatment/control covariate balance using SMD.
+
+        Random assignment controls confounding in expectation, but the
+        realized sample still needs a balance diagnostic. Numeric covariates
+        use standardized mean difference (SMD). Categorical covariates are
+        expanded to level indicators and checked with the same SMD formula.
+        ``abs(SMD) <= 0.10`` is treated as balanced by default.
+        """
+        if (
+            group_col not in data.columns
+            and group_col == "group"
+            and "treatment_group" in data.columns
+        ):
+            group_col = "treatment_group"
+        if group_col not in data.columns:
+            raise ValueError(f"Balance check requires '{group_col}' column")
+        data = data.copy()
+        if "signup_month" not in data.columns and "signup_date" in data.columns:
+            signup_month = pd.to_datetime(
+                data["signup_date"], errors="coerce"
+            ).dt.strftime("%Y-%m")
+            fallback = data["signup_date"].astype(str).str.slice(0, 7)
+            data["signup_month"] = signup_month.fillna(fallback)
+
+        observed_groups = set(data[group_col].dropna().astype(str).unique())
+        required_groups = {treatment_label, control_label}
+        if not required_groups.issubset(observed_groups):
+            raise ValueError(
+                "Balance check requires treatment/control groups: "
+                f"missing {required_groups - observed_groups}"
+            )
+
+        excluded = {
+            "customer_id",
+            "group",
+            "treatment_group",
+            "metric",
+            "churn_label",
+            "churned",
+            "converted",
+            "revenue",
+        }
+        if categorical_covariates is None:
+            categorical_covariates = [
+                col for col in ["persona", "signup_month"] if col in data.columns
+            ]
+        categorical_covariates = [
+            col for col in categorical_covariates if col in data.columns
+        ]
+
+        if covariates is None:
+            covariates = [
+                col
+                for col in data.columns
+                if col not in excluded
+                and col not in categorical_covariates
+                and pd.api.types.is_numeric_dtype(data[col])
+            ]
+        covariates = [col for col in covariates if col in data.columns]
+
+        rows: List[Dict[str, Any]] = []
+        treatment_mask = data[group_col].astype(str) == treatment_label
+        control_mask = data[group_col].astype(str) == control_label
+        n_treatment = int(treatment_mask.sum())
+        n_control = int(control_mask.sum())
+        default_pre_treatment = {"persona", "signup_month", "tenure_days"}
+        covariate_roles = {
+            col: "pre_treatment_confounder_balance"
+            for col in default_pre_treatment
+            if col in data.columns
+        } | (covariate_roles or {})
+
+        def _pass_fail(abs_smd: float) -> str:
+            if np.isfinite(abs_smd) and abs_smd <= imbalance_threshold:
+                return "pass"
+            return "fail"
+
+        for covariate in covariates:
+            treatment = pd.to_numeric(
+                data.loc[treatment_mask, covariate], errors="coerce"
+            ).dropna()
+            control = pd.to_numeric(
+                data.loc[control_mask, covariate], errors="coerce"
+            ).dropna()
+            treatment_mean = float(treatment.mean()) if len(treatment) else np.nan
+            control_mean = float(control.mean()) if len(control) else np.nan
+            difference = treatment_mean - control_mean
+            pooled_sd = float(
+                np.sqrt((treatment.var(ddof=1) + control.var(ddof=1)) / 2)
+            ) if len(treatment) > 1 and len(control) > 1 else np.nan
+            if np.isfinite(pooled_sd) and pooled_sd > 0:
+                smd = float(difference / pooled_sd)
+            elif np.isfinite(difference) and abs(difference) <= 1e-12:
+                smd = 0.0
+            else:
+                smd = float("inf")
+            abs_smd = abs(smd)
+            pass_fail = _pass_fail(abs_smd)
+            rows.append({
+                "covariate": covariate,
+                "level": "",
+                "covariate_type": "numeric",
+                "analysis_role": covariate_roles.get(covariate, "covariate_balance"),
+                "treatment_mean_or_share": treatment_mean,
+                "control_mean_or_share": control_mean,
+                "group_difference": float(difference),
+                "standardized_mean_difference": smd,
+                "abs_standardized_mean_difference": abs_smd,
+                "threshold": float(imbalance_threshold),
+                "pass_fail": pass_fail,
+                "balance_pass": pass_fail == "pass",
+                "n_treatment": n_treatment,
+                "n_control": n_control,
+                "missing_treatment": int(
+                    data.loc[treatment_mask, covariate].isna().sum()
+                ),
+                "missing_control": int(
+                    data.loc[control_mask, covariate].isna().sum()
+                ),
+            })
+
+        for covariate in categorical_covariates:
+            values = data.loc[treatment_mask | control_mask, covariate].dropna()
+            levels = sorted(values.astype(str).unique())
+            for level in levels:
+                t_indicator = data.loc[treatment_mask, covariate].astype(str) == level
+                c_indicator = data.loc[control_mask, covariate].astype(str) == level
+                treatment_share = float(t_indicator.mean()) if n_treatment else np.nan
+                control_share = float(c_indicator.mean()) if n_control else np.nan
+                difference = treatment_share - control_share
+                pooled_sd = np.sqrt(
+                    (
+                        treatment_share * (1 - treatment_share)
+                        + control_share * (1 - control_share)
+                    ) / 2
+                )
+                if np.isfinite(pooled_sd) and pooled_sd > 0:
+                    smd = float(difference / pooled_sd)
+                elif abs(difference) <= 1e-12:
+                    smd = 0.0
+                else:
+                    smd = float("inf")
+                abs_smd = abs(smd)
+                pass_fail = _pass_fail(abs_smd)
+                rows.append({
+                    "covariate": covariate,
+                    "level": level,
+                    "covariate_type": "categorical_level",
+                    "analysis_role": covariate_roles.get(
+                        covariate, "covariate_balance"
+                    ),
+                    "treatment_mean_or_share": treatment_share,
+                    "control_mean_or_share": control_share,
+                    "group_difference": float(difference),
+                    "standardized_mean_difference": smd,
+                    "abs_standardized_mean_difference": abs_smd,
+                    "threshold": float(imbalance_threshold),
+                    "pass_fail": pass_fail,
+                    "balance_pass": pass_fail == "pass",
+                    "n_treatment": n_treatment,
+                    "n_control": n_control,
+                    "missing_treatment": int(
+                        data.loc[treatment_mask, covariate].isna().sum()
+                    ),
+                    "missing_control": int(
+                        data.loc[control_mask, covariate].isna().sum()
+                    ),
+                })
+
+        return pd.DataFrame(rows)
+
+    def save_balance_check(
+        self,
+        data: pd.DataFrame,
+        output_dir: Union[str, Path] = "results",
+        experiment_name: str = "simulated_retention_campaign",
+        covariates: Optional[List[str]] = None,
+        categorical_covariates: Optional[List[str]] = None,
+        group_col: str = "group",
+        imbalance_threshold: float = 0.10,
+        covariate_roles: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Persist A/B test balance-check evidence as CSV and JSON."""
+        balance = self.compute_balance_check(
+            data=data,
+            covariates=covariates,
+            categorical_covariates=categorical_covariates,
+            group_col=group_col,
+            imbalance_threshold=imbalance_threshold,
+            covariate_roles=covariate_roles,
+        )
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        csv_path = output_path / "ab_test_balance_check.csv"
+        json_path = output_path / "ab_test_balance_check.json"
+        balance.to_csv(csv_path, index=False)
+
+        checked_numeric = sorted(
+            balance.loc[balance["covariate_type"] == "numeric", "covariate"].unique()
+        )
+        checked_categorical = sorted(
+            balance.loc[
+                balance["covariate_type"] == "categorical_level", "covariate"
+            ].unique()
+        )
+        failed = balance[balance["pass_fail"] == "fail"]
+        records = json.loads(balance.to_json(orient="records"))
+        role_summary = {}
+        if "analysis_role" in balance.columns:
+            for role, frame in balance.groupby("analysis_role"):
+                role_summary[str(role)] = {
+                    "total_checks": int(len(frame)),
+                    "passed_checks": int((frame["pass_fail"] == "pass").sum()),
+                    "failed_checks": int((frame["pass_fail"] == "fail").sum()),
+                    "overall_pass": bool((frame["pass_fail"] == "pass").all()),
+                }
+        confounder_summary = role_summary.get("pre_treatment_confounder_balance")
+        payload = {
+            "experiment_name": experiment_name,
+            "assignment_strategy": "random_assignment",
+            "confounding_control_rationale": (
+                "Treatment/Control random assignment makes potential "
+                "confounders independent of treatment in expectation, so "
+                "pre-outcome differences should be sampling noise rather than "
+                "systematic selection. The persisted balance check verifies "
+                "the realized sample before interpreting treatment effects."
+            ),
+            "balance_check_method": (
+                "Numeric covariates use standardized mean difference (SMD); "
+                "persona and other categorical covariates are expanded to "
+                "level indicators and checked with the same SMD formula."
+            ),
+            "imbalance_threshold": float(imbalance_threshold),
+            "threshold_interpretation": {
+                "pass": (
+                    f"|SMD| <= {imbalance_threshold:.2f} means the realized "
+                    "A/B split is balanced enough for unadjusted "
+                    "difference-in-means analysis."
+                ),
+                "fail": (
+                    f"|SMD| > {imbalance_threshold:.2f} flags practical "
+                    "imbalance; investigate stratification, regression "
+                    "adjustment, or rerandomization before causal "
+                    "interpretation."
+                ),
+            },
+            "covariates_checked": {
+                "numeric": checked_numeric,
+                "categorical": checked_categorical,
+            },
+            "group_sizes": {
+                "treatment": (
+                    int(balance["n_treatment"].iloc[0]) if not balance.empty else 0
+                ),
+                "control": (
+                    int(balance["n_control"].iloc[0]) if not balance.empty else 0
+                ),
+            },
+            "summary": {
+                "total_checks": int(len(balance)),
+                "passed_checks": int((balance["pass_fail"] == "pass").sum()),
+                "failed_checks": int((balance["pass_fail"] == "fail").sum()),
+                "max_abs_standardized_mean_difference": (
+                    float(balance["abs_standardized_mean_difference"].max())
+                    if not balance.empty else 0.0
+                ),
+                "overall_pass": bool(failed.empty),
+                "overall_confounding_control_pass": (
+                    bool(confounder_summary["overall_pass"])
+                    if confounder_summary is not None
+                    else bool(failed.empty)
+                ),
+            },
+            "role_summary": role_summary,
+            "failed_covariates": json.loads(failed.to_json(orient="records")),
+            "results": records,
+            "csv_path": str(csv_path),
+            "json_path": str(json_path),
+        }
+        with open(json_path, "w") as f:
+            json.dump(payload, f, indent=2)
+
+        return payload
+
+    # ------------------------------------------------------------------
     # Statistical significance testing
     # ------------------------------------------------------------------
 

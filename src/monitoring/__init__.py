@@ -17,6 +17,8 @@ from src.monitoring.monitoring_service import (
     ModelMonitoringService,
     MonitoringResult,
     AlertLevel,
+    PerformanceMetricAlert,
+    evaluate_performance_degradation,
 )
 
 __all__ = [
@@ -33,4 +35,6 @@ __all__ = [
     "ModelMonitoringService",
     "MonitoringResult",
     "AlertLevel",
+    "PerformanceMetricAlert",
+    "evaluate_performance_degradation",
 ]

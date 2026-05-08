@@ -25,6 +25,7 @@
 - [Outputs & Deliverables](#outputs--deliverables)
 - [Testing](#testing)
 - [Documentation](#documentation)
+- [Development Workflow](#development-workflow)
 - [License](#license)
 
 ---
@@ -196,7 +197,8 @@ capstone/
 │   ├── model_report.md              # ML/DL comparison & model selection rationale
 │   ├── retention_strategy.md        # 6-segment retention strategies
 │   ├── ab_test_report.md            # A/B test power analysis & results
-│   └── uplift_analysis.md           # Qini curve & 4-quadrant interpretation
+│   ├── uplift_analysis.md           # Qini curve & 4-quadrant interpretation
+│   └── development_workflow.md      # GitHub Flow branch and release policy
 │
 ├── models/                          # Trained model artifacts
 │
@@ -572,6 +574,18 @@ docker-compose run pipeline pytest tests/ -v
 | [Retention Strategy](docs/retention_strategy.md) | Segment-specific retention strategies with expected costs and effects |
 | [A/B Test Report](docs/ab_test_report.md) | Statistical test design, power analysis, and result interpretation |
 | [Uplift Analysis](docs/uplift_analysis.md) | Uplift modeling methodology, Qini curves, and segment characteristics |
+| [Development Workflow](docs/development_workflow.md) | GitHub Flow branch strategy, pull request review, CI, merge, and release/tag policy |
+
+---
+
+## Development Workflow
+
+This repository uses **GitHub Flow** with one protected `main` branch,
+short-lived **feature branch** work, pull request review, required CI checks,
+squash merge by default, and release tags created only from `main`.
+
+See [Development Workflow](docs/development_workflow.md) for the full branch,
+pull request, CI, merge, and release/tag policy.
 
 ---
 

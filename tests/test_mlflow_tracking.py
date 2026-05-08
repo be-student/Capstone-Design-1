@@ -18,6 +18,8 @@ Tests cover:
 - Configurable tracking URI from YAML
 """
 
+import argparse
+import json
 import os
 import sys
 import pytest
@@ -917,6 +919,49 @@ class TestAutoLogTraining:
         assert hasattr(mlflow_tracker, "auto_log_dl_model")
         assert hasattr(mlflow_tracker, "auto_log_ensemble")
         assert hasattr(mlflow_tracker, "log_config_artifact")
+
+    def test_run_all_mlflow_logging_creates_evidence_run(
+        self, config, tmp_path, monkeypatch
+    ):
+        """The run_all MLflow stage must create a real run with artifacts."""
+        from src.main import run_mlflow_logging
+        from src.models.mlflow_tracking import MLflowTracker
+
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        test_config = config.copy()
+        test_config["mlflow"] = {
+            "tracking_uri": f"sqlite:///{tmp_path / 'mlflow.db'}",
+            "artifact_location": str(tmp_path / "artifacts"),
+            "experiment_name": "pipeline_evidence_test",
+            "log_models": True,
+            "log_artifacts": True,
+        }
+
+        results_dir = tmp_path / "results"
+        models_dir = tmp_path / "models"
+        results_dir.mkdir()
+        models_dir.mkdir()
+        (results_dir / "model_metrics.json").write_text(
+            json.dumps({"status": "completed"}),
+            encoding="utf-8",
+        )
+        (models_dir / "model_artifacts_manifest.json").write_text(
+            json.dumps({"artifacts": [{"versioned_filename": "m_v1.pt"}]}),
+            encoding="utf-8",
+        )
+        (models_dir / "dl_churn_model_v1.pt").write_text(
+            "dummy",
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(data=None, output=str(tmp_path), small=True)
+
+        result = run_mlflow_logging(test_config, args)
+
+        assert result["status"] == "completed"
+        assert result["logged_artifact_count"] >= 2
+        tracker = MLflowTracker(test_config)
+        run = tracker.client.get_run(result["run_id"])
+        assert run.data.tags["pipeline_stage"] == "mlflow_logging"
 
 
 class TestModelTrackerIntegration:

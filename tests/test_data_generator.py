@@ -14,7 +14,6 @@ Tests cover:
 - Output file structure
 """
 
-import os
 import sys
 import pytest
 import pandas as pd
@@ -243,6 +242,16 @@ class TestEventGeneration:
         for col in required_cols:
             assert col in df.columns, f"Missing event column: {col}"
 
+    def test_empty_event_frame_uses_submission_schema(self, small_generator):
+        """Even empty event outputs should keep the raw submission schema."""
+        empty_customers = pd.DataFrame(columns=[
+            "customer_id", "persona", "signup_date", "treatment_group",
+        ])
+
+        events = small_generator._generate_all_events(empty_customers)
+
+        assert list(events.columns) == small_generator.EVENT_COLUMNS
+
     def test_all_event_types_present(self, generated_data, config):
         """All 8+ event types must appear in generated events."""
         event_types_in_data = set(generated_data["events"]["event_type"].unique())
@@ -414,6 +423,7 @@ class TestMarketingResponse:
         responses = set(treatment_events["marketing_response"].dropna())
         assert responses.issubset({"conversion", "no_response", "adverse"})
         assert "conversion" in responses
+        assert {"conversion", "no_response", "adverse"}.issubset(responses)
 
     def test_differential_persona_response(self, generated_data, config):
         """Different personas should have different marketing response rates."""

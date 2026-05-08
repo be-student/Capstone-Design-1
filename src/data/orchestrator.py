@@ -25,7 +25,6 @@ import logging
 import os
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -186,7 +185,7 @@ class SimulatorOrchestrator:
         # Convert numpy types for JSON serialization
         event_dist = {k: int(v) for k, v in event_dist.items()}
         persona_dist = {k: float(v) for k, v in persona_dist.items()}
-        validation = self._build_validation_summary(customers_df)
+        validation = self._build_validation_summary(customers_df, events_df)
 
         return {
             "num_customers": num_customers,
@@ -207,6 +206,7 @@ class SimulatorOrchestrator:
     def _build_validation_summary(
         self,
         customers_df: pd.DataFrame,
+        events_df: pd.DataFrame,
     ) -> Dict[str, Any]:
         """Summarize generator requirement checks for reporting and enforcement."""
         target_cfg = self.config["target_churn_rate"]
@@ -242,12 +242,134 @@ class SimulatorOrchestrator:
             warnings.append(
                 "Generated churn rate is outside the configured 15%-25% target band."
             )
+        event_metadata_check = self._build_event_metadata_check(
+            customers_df,
+            events_df,
+        )
+        if not event_metadata_check["event_schema_check"]["passed"]:
+            warnings.append("Generated events are missing required metadata columns.")
+        if not event_metadata_check["session_duration_check"]["passed"]:
+            warnings.append(
+                "Generated events do not contain positive session_duration values "
+                "for all visit-session events."
+            )
+        if not event_metadata_check["marketing_response_check"]["passed"]:
+            warnings.append(
+                "Generated events do not contain a meaningful marketing_response "
+                "distribution."
+            )
 
         return {
             "mode": mode,
             "group_size_check": group_size_check,
             "target_churn_check": target_churn_check,
+            **event_metadata_check,
             "warnings": warnings,
+        }
+
+    def _build_event_metadata_check(
+        self,
+        customers_df: pd.DataFrame,
+        events_df: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """Validate event metadata needed to audit session and marketing behavior."""
+        required_columns = CustomerDataGenerator.EVENT_COLUMNS
+        missing_columns = [
+            column for column in required_columns
+            if column not in events_df.columns
+        ]
+        event_schema_check = {
+            "required_columns": required_columns,
+            "missing_columns": missing_columns,
+            "passed": not missing_columns,
+        }
+
+        session_duration_check = {
+            "checked_event_count": 0,
+            "positive_count": 0,
+            "passed": False,
+        }
+        marketing_response_check = {
+            "allowed_values": sorted(CustomerDataGenerator.MARKETING_RESPONSES),
+            "response_counts": {},
+            "persona_response_counts": {},
+            "responses_observed": [],
+            "response_events_have_channel": False,
+            "passed": False,
+        }
+
+        if missing_columns:
+            return {
+                "event_schema_check": event_schema_check,
+                "session_duration_check": session_duration_check,
+                "marketing_response_check": marketing_response_check,
+            }
+
+        session_events = events_df[
+            events_df["event_type"].isin(CustomerDataGenerator.SESSION_EVENT_TYPES)
+        ]
+        session_values = pd.to_numeric(
+            session_events["session_duration"],
+            errors="coerce",
+        )
+        positive_sessions = session_values.notna() & (session_values > 0)
+        session_duration_check = {
+            "checked_event_count": int(len(session_events)),
+            "positive_count": int(positive_sessions.sum()),
+            "passed": bool(len(session_events) > 0 and positive_sessions.all()),
+        }
+
+        response_events = events_df[events_df["marketing_response"].notna()].copy()
+        response_values = set(response_events["marketing_response"].astype(str))
+        allowed_values = CustomerDataGenerator.MARKETING_RESPONSES
+        response_counts = (
+            response_events["marketing_response"].astype(str).value_counts().to_dict()
+        )
+        response_counts = {key: int(value) for key, value in response_counts.items()}
+
+        persona_response_counts: Dict[str, Dict[str, int]] = {}
+        if not response_events.empty and "persona" in customers_df.columns:
+            customer_persona = customers_df.set_index("customer_id")["persona"]
+            response_events["persona"] = response_events["customer_id"].map(
+                customer_persona
+            )
+            counts = (
+                response_events
+                .groupby(["persona", "marketing_response"])
+                .size()
+                .unstack(fill_value=0)
+            )
+            persona_response_counts = {
+                str(persona): {
+                    str(response): int(count)
+                    for response, count in row.items()
+                }
+                for persona, row in counts.iterrows()
+            }
+
+        expected_responses = allowed_values
+        response_events_have_channel = bool(
+            not response_events.empty
+            and response_events["marketing_channel"].notna().all()
+        )
+        marketing_response_check = {
+            "allowed_values": sorted(allowed_values),
+            "response_counts": response_counts,
+            "persona_response_counts": persona_response_counts,
+            "responses_observed": sorted(response_values),
+            "response_events_have_channel": response_events_have_channel,
+            "passed": bool(
+                response_values.issubset(allowed_values)
+                and expected_responses.issubset(response_values)
+                and response_events_have_channel
+                and len(persona_response_counts) >= 2
+            ),
+        }
+
+        return {
+            "event_schema_check": event_schema_check,
+            "session_duration_check": session_duration_check,
+            "marketing_response_check": marketing_response_check,
         }
 
     def _enforce_generation_requirements(self, summary: Dict[str, Any]) -> None:
@@ -261,6 +383,12 @@ class SimulatorOrchestrator:
             failures.append("treatment/control minimum group size")
         if not validation["target_churn_check"]["passed"]:
             failures.append("target churn range")
+        if not validation["event_schema_check"]["passed"]:
+            failures.append("event metadata schema")
+        if not validation["session_duration_check"]["passed"]:
+            failures.append("session duration metadata")
+        if not validation["marketing_response_check"]["passed"]:
+            failures.append("marketing response metadata")
 
         if failures:
             raise ValueError(

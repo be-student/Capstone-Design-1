@@ -9,7 +9,7 @@ All configurable parameters are sourced from config/simulator_config.yaml.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -49,6 +49,7 @@ def render_model_monitoring(st_module, config: Dict, data_loader=None):
     survival_curves = data_loader.load_survival_curves()
     survival_data = data_loader.load_survival_data()
     performance_history = _load_performance_history(data_loader)
+    performance_alerts = _load_performance_alerts(data_loader)
 
     # =================================================================
     # Section 1: Drift Detection Overview
@@ -66,7 +67,9 @@ def render_model_monitoring(st_module, config: Dict, data_loader=None):
     st.markdown("---")
     st.subheader("Model Performance Metrics Over Time")
 
-    _render_performance_section(st, model_metrics, performance_history)
+    _render_performance_section(
+        st, model_metrics, performance_history, performance_alerts,
+    )
 
     # =================================================================
     # Section 3: Scoring Throughput & Latency
@@ -242,11 +245,27 @@ def _load_performance_history(data_loader) -> pd.DataFrame:
     return merged
 
 
+def _load_performance_alerts(data_loader) -> Dict[str, Any]:
+    """Load model performance degradation alerts when the loader supports it."""
+    if not hasattr(data_loader, "load_performance_alerts"):
+        return {}
+    try:
+        alerts = data_loader.load_performance_alerts()
+    except Exception as exc:
+        logger.warning("Failed to load performance alerts: %s", exc)
+        return {}
+    return alerts if isinstance(alerts, dict) else {}
+
+
 def _render_performance_section(
-    st, model_metrics: Dict, mlflow_runs: pd.DataFrame,
+    st,
+    model_metrics: Dict,
+    mlflow_runs: pd.DataFrame,
+    performance_alerts: Optional[Dict[str, Any]] = None,
 ):
     """Render model performance metrics section."""
-    if not model_metrics and mlflow_runs.empty:
+    performance_alerts = performance_alerts or {}
+    if not model_metrics and mlflow_runs.empty and not performance_alerts.get("metrics"):
         st.warning("No model performance metrics available.")
         return
 
@@ -294,12 +313,14 @@ def _render_performance_section(
             f"(AUC = {best_auc:.4f})"
         )
 
+    _render_performance_alerts(st, performance_alerts)
+
     # MLflow run history
     if not mlflow_runs.empty:
         st.markdown("#### Training Run History")
         if "timestamp" in mlflow_runs.columns:
             fig_runs = go.Figure()
-            for metric in ["auc", "f1_score"]:
+            for metric in ["auc", "precision", "recall", "f1_score"]:
                 if metric in mlflow_runs.columns:
                     fig_runs.add_trace(go.Scatter(
                         x=mlflow_runs["timestamp"],
@@ -327,6 +348,42 @@ def _render_performance_section(
         st.dataframe(
             mlflow_runs[run_display_cols], use_container_width=True,
         )
+
+
+def _render_performance_alerts(st, performance_alerts: Dict[str, Any]):
+    """Render threshold-based performance degradation alerts."""
+    metrics = performance_alerts.get("metrics", {})
+    if not metrics:
+        return
+
+    st.markdown("#### Performance Degradation Alerts")
+    degraded = bool(performance_alerts.get("performance_degradation"))
+    status = str(performance_alerts.get("status", "ok"))
+    model_type = performance_alerts.get("model_type", "model")
+    if degraded:
+        degraded_metrics = ", ".join(
+            performance_alerts.get("degraded_metrics", [])
+        )
+        st.error(
+            f"Performance degradation detected for {model_type}: "
+            f"{degraded_metrics}"
+        )
+    elif status == "warning":
+        st.warning(f"Performance metrics for {model_type} are approaching thresholds.")
+    else:
+        st.success(f"No performance degradation detected for {model_type}.")
+
+    rows = []
+    for metric, payload in metrics.items():
+        rows.append({
+            "metric": metric,
+            "current": payload.get("current"),
+            "baseline": payload.get("baseline"),
+            "drop": payload.get("drop"),
+            "threshold": payload.get("threshold"),
+            "status": payload.get("status"),
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 
 def _render_throughput_section(st, scoring_throughput: pd.DataFrame):

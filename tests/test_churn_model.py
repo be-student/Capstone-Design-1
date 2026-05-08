@@ -16,6 +16,7 @@ Tests cover:
 - MLflow experiment tracking integration
 """
 
+import json
 import os
 import sys
 import pytest
@@ -393,6 +394,29 @@ class TestMLChurnModel:
         assert loaded.best_params == ml_model.best_params
         assert loaded.cv_scores is not None
 
+    def test_ml_model_save_writes_versioned_artifact(self, config, tmp_path):
+        """ML save must keep the legacy filename and add versioned evidence."""
+        from src.models.churn_model import MLChurnModel
+
+        model = MLChurnModel(config)
+        model.model = {"trained": True}
+        model.model_type = "lightgbm"
+        model.feature_names_ = ["feature_0"]
+
+        model.save(str(tmp_path / "ml_churn_model.pkl"))
+
+        assert (tmp_path / "ml_churn_model.pkl.joblib").exists()
+        assert (tmp_path / "ml_churn_model_v1.pkl.joblib").exists()
+        manifest = json.loads(
+            (tmp_path / "model_artifacts_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert any(
+            row["versioned_filename"] == "ml_churn_model_v1.pkl.joblib"
+            for row in manifest["artifacts"]
+        )
+
     def test_ml_model_hyperparam_grid_exists(self, ml_model):
         """ML model must have parameter grids for both XGBoost and LightGBM."""
         from src.models.churn_model import MLChurnModel
@@ -498,6 +522,29 @@ class TestDLChurnModel:
         probs_loaded = loaded_model.predict_proba(X_test[feature_cols])
         np.testing.assert_array_almost_equal(
             probs_original, probs_loaded, decimal=5
+        )
+
+    def test_dl_model_save_writes_versioned_artifact(self, config, tmp_path):
+        """DL save must keep the legacy filename and add versioned evidence."""
+        from src.models.churn_model import DLChurnModel
+
+        model = DLChurnModel(config)
+        model.input_size_ = 3
+        model.model = model._build_network(model.input_size_)
+        model.network = model.model
+
+        model.save(str(tmp_path / "dl_churn_model.pt"))
+
+        assert (tmp_path / "dl_churn_model.pt").exists()
+        assert (tmp_path / "dl_churn_model_v1.pt").exists()
+        manifest = json.loads(
+            (tmp_path / "model_artifacts_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert any(
+            row["versioned_filename"] == "dl_churn_model_v1.pt"
+            for row in manifest["artifacts"]
         )
 
 

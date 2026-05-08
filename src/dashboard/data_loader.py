@@ -1547,6 +1547,99 @@ class DashboardDataLoader:
             "ks_mean": float(np.mean(ks_values)) if ks_values else 0.0,
         }])
 
+    def load_performance_alerts(self) -> Dict[str, Any]:
+        """Load or derive model performance degradation alerts.
+
+        New monitoring reports contain a top-level ``performance_alerts``
+        payload. Older reports only contain ``performance.latest`` or the
+        standalone model performance history CSV, so this loader derives the
+        same alert shape from those artifacts for backward compatibility.
+        """
+        report_path = self._resolve_existing_path("monitoring_report.json")
+        if report_path is not None:
+            try:
+                report = self._read_json(report_path)
+            except Exception as exc:
+                self._record_artifact_issue(
+                    "performance_alerts",
+                    f"Monitoring report could not be read for performance alerts: {exc}.",
+                )
+                return {}
+            if isinstance(report, dict):
+                alerts = report.get("performance_alerts")
+                performance_section = report.get("performance", {})
+                if not alerts and isinstance(performance_section, dict):
+                    alerts = (
+                        performance_section.get("performance_alerts")
+                        or performance_section.get("alerts")
+                    )
+                if isinstance(alerts, dict):
+                    self._clear_artifact_issue("performance_alerts")
+                    return self._normalize_performance_alerts(alerts)
+
+                latest = (
+                    performance_section.get("latest")
+                    if isinstance(performance_section, dict)
+                    else None
+                )
+                if latest:
+                    derived = self._derive_performance_alerts(
+                        pd.DataFrame(latest)
+                    )
+                    if derived.get("metrics"):
+                        return derived
+
+        history = self.load_model_performance_history()
+        if history.empty:
+            return {}
+        return self._derive_performance_alerts(history)
+
+    def _derive_performance_alerts(
+        self, history: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """Derive performance alerts from a history dataframe."""
+        from src.monitoring.monitoring_service import (
+            evaluate_performance_degradation,
+        )
+
+        alerts = evaluate_performance_degradation(
+            history,
+            thresholds=self.config,
+        )
+        return self._normalize_performance_alerts(alerts)
+
+    @staticmethod
+    def _normalize_performance_alerts(
+        alerts: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Normalize legacy and current performance alert payload names."""
+        normalized = dict(alerts)
+        metrics = (
+            normalized.get("metrics")
+            or normalized.get("metric_alerts")
+            or normalized.get("alerts")
+            or {}
+        )
+        normalized["metrics"] = metrics
+        normalized["metric_alerts"] = metrics
+        degradation = bool(
+            normalized.get("performance_degradation")
+            or normalized.get("degraded")
+            or normalized.get("status") == "degraded"
+            or normalized.get("degraded_metrics")
+        )
+        normalized["performance_degradation"] = degradation
+        normalized.setdefault(
+            "status",
+            "degraded" if degradation else "ok",
+        )
+        normalized.setdefault(
+            "alert_level",
+            "red" if degradation else "green",
+        )
+        normalized.setdefault("degraded_metrics", [])
+        return normalized
+
     def load_auc_history(self) -> pd.DataFrame:
         """Load AUC metric time series."""
         return self._load_metric_timeseries("auc")

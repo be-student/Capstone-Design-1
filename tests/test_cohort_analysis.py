@@ -24,7 +24,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.analysis.cohort_analysis import CohortAnalyzer, DEFAULT_CONFIG
+from src.analysis.cohort_analysis import (
+    CohortAnalyzer,
+    DEFAULT_CONFIG,
+    compute_journey_funnel,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +450,71 @@ class TestCohortMetrics:
         )
         assert "revenue" not in metrics
         assert "avg_order_value" not in metrics
+
+
+class TestJourneyFunnelTimingEvidence:
+    """Tests for journey funnel conversion and timing evidence."""
+
+    def test_includes_stage_timing_and_dropoff_columns(self) -> None:
+        """Journey funnel should expose stage timing, tenure, and dropoff evidence."""
+        customers = pd.DataFrame({
+            "customer_id": ["C1", "C2", "C3", "C4"],
+            "signup_date": pd.to_datetime([
+                "2024-01-01", "2024-01-10", "2024-01-05", "2024-01-01",
+            ]),
+            "churn_label": [0, 1, 0, 1],
+            "churn_date": pd.to_datetime([
+                None, "2024-02-20", None, None,
+            ]),
+        })
+        events = pd.DataFrame({
+            "customer_id": [
+                "C1", "C1", "C1", "C1", "C1",
+                "C2", "C2",
+                "C3",
+                "C4", "C4", "C4",
+            ],
+            "event_type": [
+                "purchase", "purchase", "purchase", "purchase", "purchase",
+                "purchase", "page_view",
+                "page_view",
+                "purchase", "purchase", "page_view",
+            ],
+            "event_date": pd.to_datetime([
+                "2024-01-05", "2024-01-20", "2024-02-10",
+                "2024-03-01", "2024-04-01",
+                "2024-01-15", "2024-02-01",
+                "2024-01-25",
+                "2024-01-02", "2024-01-10", "2024-01-30",
+            ]),
+        })
+
+        funnel = compute_journey_funnel(customers, events)
+
+        expected_columns = {
+            "avg_days_since_signup",
+            "median_days_since_signup",
+            "avg_days_from_previous_stage",
+            "median_days_from_previous_stage",
+            "dropoff_customer_count",
+            "avg_dropoff_days_after_previous_stage",
+            "median_dropoff_days_after_previous_stage",
+        }
+        assert expected_columns.issubset(funnel.columns)
+
+        stage_counts = funnel.set_index("stage")["count"].to_dict()
+        assert stage_counts == {
+            "Signup": 4,
+            "First Purchase": 3,
+            "Repeat Purchase": 2,
+            "Loyal": 1,
+            "Churned": 2,
+        }
+
+        indexed = funnel.set_index("stage")
+        assert indexed.loc["First Purchase", "median_days_since_signup"] == 4.0
+        assert indexed.loc["Repeat Purchase", "dropoff_customer_count"] == 1
+        assert indexed.loc["Churned", "median_days_since_signup"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -1006,6 +1075,20 @@ class TestPlotRetentionLines:
             assert os.path.getsize(path) > 0
             plt.close(fig)
 
+    def test_pipeline_named_save_creates_churn_difference_plot(
+        self, analyzer: CohortAnalyzer, sample_events: pd.DataFrame
+    ) -> None:
+        """Saving pipeline retention curves should emit churn difference evidence."""
+        cohort_data = analyzer.assign_cohorts(sample_events, cohort_type="monthly")
+        matrix = analyzer.compute_retention_matrix(cohort_data)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "cohort_retention_curves.png")
+            fig = analyzer.plot_retention_lines(matrix, save_path=path)
+            churn_path = os.path.join(tmpdir, "cohort_churn_rate_differences.png")
+            assert os.path.isfile(churn_path)
+            assert os.path.getsize(churn_path) > 0
+            plt.close(fig)
+
     def test_has_legend(
         self, analyzer: CohortAnalyzer, sample_events: pd.DataFrame
     ) -> None:
@@ -1029,6 +1112,33 @@ class TestPlotRetentionLines:
         # Check grid is visible (at least on y-axis)
         assert ax.yaxis.get_gridlines()[0].get_visible()
         plt.close(fig)
+
+
+class TestPlotChurnRateDifferences:
+    """Tests for direct cohort churn-rate difference visualization."""
+
+    def test_returns_figure(
+        self, analyzer: CohortAnalyzer, sample_events: pd.DataFrame
+    ) -> None:
+        """Should return a matplotlib Figure."""
+        cohort_data = analyzer.assign_cohorts(sample_events, cohort_type="monthly")
+        matrix = analyzer.compute_retention_matrix(cohort_data)
+        fig = analyzer.plot_churn_rate_differences(matrix)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(
+        self, analyzer: CohortAnalyzer, sample_events: pd.DataFrame
+    ) -> None:
+        """Should save churn-rate difference chart when save_path is provided."""
+        cohort_data = analyzer.assign_cohorts(sample_events, cohort_type="monthly")
+        matrix = analyzer.compute_retention_matrix(cohort_data)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "cohort_churn_rate_differences.png")
+            fig = analyzer.plot_churn_rate_differences(matrix, save_path=path)
+            assert os.path.isfile(path)
+            assert os.path.getsize(path) > 0
+            plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

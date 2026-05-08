@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "model_kind": "ml_churn",
+      "version": "v1",
+      "primary_filename": "ml_churn_model.pkl.joblib",
+      "versioned_filename": "ml_churn_model_v1.pkl.joblib",
+      "primary_path": "/Users/song-eun-u/Documents/github/Capstone-Design-1/models/ml_churn_model.pkl.joblib",
+      "versioned_path": "/Users/song-eun-u/Documents/github/Capstone-Design-1/models/ml_churn_model_v1.pkl.joblib",
+      "metadata": {
+        "model_type": "existing_compatibility_artifact"
+      }
+    },
+    {
+      "model_kind": "dl_churn",
+      "version": "v1",
+      "primary_filename": "dl_churn_model.pt",
+      "versioned_filename": "dl_churn_model_v1.pt",
+      "primary_path": "/Users/song-eun-u/Documents/github/Capstone-Design-1/models/dl_churn_model.pt",
+      "versioned_path": "/Users/song-eun-u/Documents/github/Capstone-Design-1/models/dl_churn_model_v1.pt",
+      "metadata": {
+        "architecture": "transformer"
+      }
+    }
+  ]
+}

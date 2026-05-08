@@ -15,7 +15,6 @@ All configurable parameters are read from the YAML config dictionary.
 import json
 import logging
 import os
-import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -28,6 +27,84 @@ from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, TensorDataset
 
 logger = logging.getLogger(__name__)
+
+
+def _model_artifact_version(config: Dict[str, Any]) -> str:
+    """Resolve a filesystem-safe model artifact version."""
+    version_cfg = config.get("model_versioning", {})
+    pipeline_cfg = config.get("pipeline", {})
+    raw_version = (
+        version_cfg.get("version")
+        or version_cfg.get("run_id")
+        or pipeline_cfg.get("model_version")
+        or pipeline_cfg.get("run_id")
+        or os.environ.get("MODEL_VERSION")
+        or "v1"
+    )
+    version = str(raw_version).strip() or "v1"
+    if version.isdigit():
+        version = f"v{version}"
+    safe = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_"
+        for char in version
+    ).strip("_")
+    return safe or "v1"
+
+
+def _versioned_model_path(path: Union[str, Path], config: Dict[str, Any]) -> Path:
+    """Return the sibling path used for versioned model evidence."""
+    primary = Path(path)
+    version = _model_artifact_version(config)
+    if primary.name.endswith(".pkl.joblib"):
+        base = primary.name[: -len(".pkl.joblib")]
+        return primary.with_name(f"{base}_{version}.pkl.joblib")
+    return primary.with_name(f"{primary.stem}_{version}{primary.suffix}")
+
+
+def _write_model_artifact_manifest(
+    primary_path: Path,
+    versioned_path: Path,
+    model_kind: str,
+    metadata: Dict[str, Any],
+) -> None:
+    """Record primary/versioned model artifact evidence in the model dir."""
+    manifest_path = primary_path.parent / "model_artifacts_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = {}
+    else:
+        manifest = {}
+
+    records = list(manifest.get("artifacts", []))
+    record = {
+        "model_kind": model_kind,
+        "version": _model_artifact_version(metadata.get("config", {})),
+        "primary_filename": primary_path.name,
+        "versioned_filename": versioned_path.name,
+        "primary_path": str(primary_path),
+        "versioned_path": str(versioned_path),
+        "metadata": {
+            key: value
+            for key, value in metadata.items()
+            if key != "config"
+        },
+    }
+    records = [
+        existing
+        for existing in records
+        if not (
+            existing.get("model_kind") == model_kind
+            and existing.get("primary_filename") == primary_path.name
+        )
+    ]
+    records.append(record)
+    manifest["artifacts"] = records
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +602,9 @@ class MLChurnModel:
         Args:
             path: File path (without extension). Saves as .joblib.
         """
-        save_path = path if path.endswith(".joblib") else f"{path}.joblib"
-        joblib.dump({
+        save_path = Path(path if path.endswith(".joblib") else f"{path}.joblib")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
             "model": self.model,
             "model_type": self.model_type,
             "best_params": self.best_params,
@@ -534,7 +612,23 @@ class MLChurnModel:
             "feature_names": self.feature_names_,
             "config": self.config,
             "seed": self.seed,
-        }, save_path)
+        }
+        joblib.dump(payload, save_path)
+
+        versioned_path = _versioned_model_path(save_path, self.config)
+        if versioned_path != save_path:
+            joblib.dump(payload, versioned_path)
+        _write_model_artifact_manifest(
+            primary_path=save_path,
+            versioned_path=versioned_path,
+            model_kind="ml_churn",
+            metadata={
+                "config": self.config,
+                "model_type": self.model_type,
+                "n_folds": self.n_folds,
+                "feature_count": len(self.feature_names_ or []),
+            },
+        )
 
     @classmethod
     def load(cls, path: str) -> "MLChurnModel":
@@ -1123,8 +1217,9 @@ class DLChurnModel:
         Args:
             path: File path for the saved model (.pt).
         """
-        save_path = path if path.endswith(".pt") else f"{path}.pt"
-        torch.save({
+        save_path = Path(path if path.endswith(".pt") else f"{path}.pt")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
             "model_state_dict": self.model.state_dict(),
             "config": self.config,
             "input_size": self.input_size_,
@@ -1132,7 +1227,23 @@ class DLChurnModel:
             "feature_mean": self._feature_mean,
             "feature_std": self._feature_std,
             "seed": self.seed,
-        }, save_path)
+        }
+        torch.save(payload, save_path)
+
+        versioned_path = _versioned_model_path(save_path, self.config)
+        if versioned_path != save_path:
+            torch.save(payload, versioned_path)
+        _write_model_artifact_manifest(
+            primary_path=save_path,
+            versioned_path=versioned_path,
+            model_kind="dl_churn",
+            metadata={
+                "config": self.config,
+                "architecture": self.architecture,
+                "sequence_window": self.sequence_window,
+                "input_size": self.input_size_,
+            },
+        )
 
     @classmethod
     def load(cls, path: str) -> "DLChurnModel":
