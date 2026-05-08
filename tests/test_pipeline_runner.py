@@ -362,9 +362,17 @@ class TestPipelineArtifactValidation:
         pd.DataFrame({"customer_id": ["stale"]}).to_csv(
             artifacts_dir / "recommendations.csv", index=False
         )
+        (results_dir / "cohort_churn_rate_differences.png").write_bytes(
+            b"fresh-cohort-churn-plot"
+        )
+        (artifacts_dir / "cohort_churn_rate_differences.png").write_bytes(
+            b"stale-cohort-churn-plot"
+        )
 
         monkeypatch.setattr(
-            main_mod, "REQUIRED_PIPELINE_ARTIFACTS", ["recommendations.csv"]
+            main_mod,
+            "REQUIRED_PIPELINE_ARTIFACTS",
+            ["recommendations.csv", "cohort_churn_rate_differences.png"],
         )
         monkeypatch.setattr(
             main_mod,
@@ -383,13 +391,20 @@ class TestPipelineArtifactValidation:
             data_dir,
         )
 
-        row = checklist["artifacts"][0]
+        rows = {row["artifact"]: row for row in checklist["artifacts"]}
+        row = rows["recommendations.csv"]
+        png_row = rows["cohort_churn_rate_differences.png"]
         assert row["mirror_hash_match"] is True
+        assert png_row["mirror_hash_match"] is True
         assert row["satisfied"] is True
+        assert png_row["satisfied"] is True
         assert checklist["full_submission_ready"] is True
         assert pd.read_csv(artifacts_dir / "recommendations.csv")[
             "customer_id"
         ].tolist() == ["C1", "C2"]
+        assert (
+            artifacts_dir / "cohort_churn_rate_differences.png"
+        ).read_bytes() == b"fresh-cohort-churn-plot"
 
     def test_run_all_fails_when_checklist_not_full_ready_even_without_missing(
         self, tmp_path, monkeypatch

@@ -84,6 +84,7 @@ REQUIRED_PIPELINE_ARTIFACTS = [
     "cohort_retention_matrix.csv",
     "cohort_milestones.csv",
     "cohort_churn_rates.csv",
+    "cohort_churn_rate_differences.png",
     "churn_last30_sequences.json",
     "pre_churn_events.csv",
     "journey_funnel.csv",
@@ -1971,6 +1972,7 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
         "cohort_churn_rates.csv",
         "cohort_retention_heatmap.png",
         "cohort_retention_curves.png",
+        "cohort_churn_rate_differences.png",
         "churn_last30_sequences.json",
         "churn_last30_sequences.csv",
         "pre_churn_events.csv",
@@ -2044,6 +2046,9 @@ def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
         lines_path = str(results_dir / "cohort_retention_curves.png")
         analyzer.plot_retention_lines(retention, save_path=lines_path)
         _publish_artifact(config, Path(lines_path))
+        churn_diff_path = results_dir / "cohort_churn_rate_differences.png"
+        if churn_diff_path.exists():
+            _publish_artifact(config, churn_diff_path)
         logger.info("Retention curves saved to %s", lines_path)
 
         milestone_df = analyzer.extract_retention_milestones(retention).reset_index()
