@@ -136,15 +136,15 @@ class TestVerifyPipelineOutputs:
         ):
             data_dir = tmp_path / "data" / "raw"
             data_dir.mkdir(parents=True)
-            (data_dir / "customers.csv").write_text("id,name\n1,Alice")
+            (data_dir / "customers.csv").write_text("id,name\n1,Alice", encoding="utf-8")
 
             models_dir = tmp_path / "models"
             models_dir.mkdir(parents=True)
-            (models_dir / "model.pkl").write_text("model")
+            (models_dir / "model.pkl").write_text("model", encoding="utf-8")
 
             results_dir = tmp_path / "results"
             results_dir.mkdir(parents=True)
-            (results_dir / "metrics.json").write_text("{}")
+            (results_dir / "metrics.json").write_text("{}", encoding="utf-8")
 
             result = verify_pipeline_outputs()
             assert result["data"] is True
@@ -189,7 +189,7 @@ class TestCheckPipelineState:
     def test_corrupt_state_file_returns_none(self, tmp_path):
         """Corrupt state file should return None."""
         state_file = tmp_path / "pipeline_state.json"
-        state_file.write_text("{invalid json")
+        state_file.write_text("{invalid json", encoding="utf-8")
         with patch(
             "scripts.run_pipeline_and_dashboard.PIPELINE_STATE_FILE",
             state_file,
@@ -212,13 +212,20 @@ class TestBashEntrypoint:
 
     def test_script_syntax_valid(self):
         """entrypoint.sh should pass bash syntax check."""
+        import shutil
+        if shutil.which("bash") is None:
+            pytest.skip("bash not available on this host")
         script = PROJECT_ROOT / "scripts" / "entrypoint.sh"
+        # Pipe raw bytes via stdin so Windows-style paths aren't passed to bash
+        # (which mangles backslashes) and so Python's text-mode newline
+        # translation doesn't inject \r and break bash's parser.
         result = subprocess.run(
-            ["bash", "-n", str(script)],
+            ["bash", "-n"],
+            input=script.read_bytes(),
             capture_output=True,
-            text=True,
         )
-        assert result.returncode == 0, f"Syntax error: {result.stderr}"
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        assert result.returncode == 0, f"Syntax error: {stderr}"
 
 
 # ===========================================================================
@@ -232,7 +239,7 @@ class TestDockerComposeConfig:
         """Load docker-compose.yml."""
         import yaml
         compose_file = PROJECT_ROOT / "docker-compose.yml"
-        with open(compose_file) as f:
+        with open(compose_file, encoding="utf-8") as f:
             return yaml.safe_load(f)
 
     def test_dashboard_depends_on_pipeline(self, compose_config):
