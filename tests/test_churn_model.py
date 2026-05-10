@@ -89,7 +89,7 @@ def _lightweight_cv_auc(
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -436,7 +436,7 @@ class TestMLChurnModel:
 
     def test_imbalance_weighting_applied_in_cv_paths(self):
         """CV/tuning folds must apply class-imbalance weighting."""
-        source = (PROJECT_ROOT / "src" / "models" / "churn_model.py").read_text()
+        source = (PROJECT_ROOT / "src" / "models" / "churn_model.py").read_text(encoding="utf-8")
 
         assert '"scale_pos_weight": self._compute_scale_pos_weight(y)' in source
         assert '**self._class_imbalance_params(y)' in source

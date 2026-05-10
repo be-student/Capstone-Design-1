@@ -43,7 +43,7 @@ def docker_compose_path():
 @pytest.fixture
 def docker_compose(docker_compose_path):
     """Load and parse docker-compose.yml."""
-    with open(docker_compose_path, "r") as f:
+    with open(docker_compose_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -51,28 +51,28 @@ def docker_compose(docker_compose_path):
 def dockerfile_mlflow():
     """Read Dockerfile.mlflow contents."""
     path = PROJECT_ROOT / "Dockerfile.mlflow"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 @pytest.fixture
 def dockerfile_pipeline():
     """Read Dockerfile.pipeline contents."""
     path = PROJECT_ROOT / "Dockerfile.pipeline"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 @pytest.fixture
 def dockerfile_dashboard():
     """Read Dockerfile.dashboard contents."""
     path = PROJECT_ROOT / "Dockerfile.dashboard"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 @pytest.fixture
 def mlflow_entrypoint():
     """Read MLflow entrypoint script contents."""
     path = PROJECT_ROOT / "scripts" / "mlflow_entrypoint.sh"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +635,7 @@ class TestDockerBuildReadiness:
 
     def test_requirements_has_core_deps(self, project_root):
         """requirements.txt must include core pipeline dependencies."""
-        reqs = (project_root / "requirements.txt").read_text()
+        reqs = (project_root / "requirements.txt").read_text(encoding="utf-8")
         assert "numpy" in reqs
         assert "pandas" in reqs
         assert "torch" in reqs
@@ -644,7 +644,7 @@ class TestDockerBuildReadiness:
 
     def test_dashboard_requirements_has_runtime_deps(self, project_root):
         """requirements-dashboard.txt must include dashboard runtime dependencies."""
-        reqs = (project_root / "requirements-dashboard.txt").read_text()
+        reqs = (project_root / "requirements-dashboard.txt").read_text(encoding="utf-8")
         assert "streamlit" in reqs
         assert "plotly" in reqs
         assert "redis" in reqs
@@ -682,7 +682,7 @@ class TestDockerBuildReadiness:
         """All Dockerfiles must have a valid FROM instruction."""
         for df_name in ["Dockerfile.mlflow", "Dockerfile.pipeline",
                         "Dockerfile.dashboard"]:
-            content = (project_root / df_name).read_text()
+            content = (project_root / df_name).read_text(encoding="utf-8")
             from_lines = [
                 line for line in content.split("\n")
                 if line.strip().startswith("FROM")
@@ -907,7 +907,7 @@ class TestPipelineEntrypoint:
     @pytest.fixture
     def pipeline_entrypoint(self):
         path = PROJECT_ROOT / "scripts" / "pipeline_entrypoint.sh"
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
 
     def test_entrypoint_exists(self, project_root):
         """Pipeline entrypoint script must exist."""

@@ -39,7 +39,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -490,7 +490,7 @@ class TestDashboardAdapters:
 
         main.run_ab_test(cfg, args)
 
-        detailed = json.loads((results_dir / "ab_test_detailed.json").read_text())
+        detailed = json.loads((results_dir / "ab_test_detailed.json").read_text(encoding="utf-8"))
         assert detailed["experiments"]
         experiment = detailed["experiments"][0]
         for key in [

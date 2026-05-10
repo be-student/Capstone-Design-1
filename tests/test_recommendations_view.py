@@ -38,7 +38,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 @pytest.fixture
 def config():
     """Load simulator configuration."""
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

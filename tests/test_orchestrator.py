@@ -33,7 +33,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 @pytest.fixture
 def config():
     """Load simulator configuration from YAML."""
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -206,7 +206,7 @@ class TestOutputFiles:
         _, output_dir = run_result
         summary_path = output_dir / "generation_summary.json"
         assert summary_path.exists()
-        with open(summary_path) as f:
+        with open(summary_path, encoding="utf-8") as f:
             summary = json.load(f)
         assert "num_customers" in summary
         assert "num_events" in summary
@@ -226,7 +226,7 @@ class TestPipelineState:
         """Pipeline state must show 'completed' status after successful run."""
         _, output_dir = run_result
         state_path = output_dir / "pipeline_state.json"
-        with open(state_path) as f:
+        with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
         assert state["data_generation"] == "completed"
 
@@ -246,7 +246,7 @@ class TestPipelineState:
 
         state_path = Path(output_dir) / "pipeline_state.json"
         if state_path.exists():
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
             assert state["data_generation"] in ("failed", "pending")
 

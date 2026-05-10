@@ -74,7 +74,7 @@ def sample_config():
 def config_file(sample_config, tmp_path):
     """Write sample config to a temp YAML file and return its path."""
     cfg_path = tmp_path / "test_config.yaml"
-    with open(cfg_path, "w") as f:
+    with open(cfg_path, "w", encoding="utf-8") as f:
         yaml.dump(sample_config, f)
     return str(cfg_path)
 
@@ -258,7 +258,7 @@ class TestLoadConfigExtended:
     def test_load_empty_yaml(self, tmp_path):
         """Empty YAML should return empty dict."""
         p = tmp_path / "empty.yaml"
-        p.write_text("")
+        p.write_text("", encoding="utf-8")
         assert load_config(str(p)) == {}
 
     def test_load_preserves_nested_structure(self, config_file):
