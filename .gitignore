@@ -40,3 +40,22 @@ build/
 
 # require.md
 require.md
+
+# Playwright MCP cache
+.playwright-mcp/
+
+# Accidental nested clones
+/Capstone-Design-1/
+
+# One-off iteration screenshots / overview captures
+/iter*_overview*.png
+
+# Per-iteration test artifacts (XML, logs); keep curated audit MDs
+/_test_results/iter1_*
+/_test_results/iter1b_*
+/_test_results/iter2_*
+/_test_results/iter3_*
+/_test_results/iter4_*
+/_test_results/iter6_*
+/_test_results/iter7_*
+/_test_results/SIMULATOR_SAAS_REVIEW.md

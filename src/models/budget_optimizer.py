@@ -810,7 +810,7 @@ class BudgetOptimizer:
             state["last_params"] = self._last_params
 
         state_file = f"{path}.json"
-        with open(state_file, "w") as f:
+        with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
         if self.last_result is not None:
@@ -829,7 +829,7 @@ class BudgetOptimizer:
             Restored BudgetOptimizer instance.
         """
         state_file = f"{path}.json"
-        with open(state_file, "r") as f:
+        with open(state_file, "r", encoding="utf-8") as f:
             state = json.load(f)
 
         config = {

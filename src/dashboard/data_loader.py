@@ -77,7 +77,7 @@ class DashboardDataLoader:
         return None
 
     def _read_json(self, path: Path) -> Any:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     @staticmethod
@@ -1194,7 +1194,7 @@ class DashboardDataLoader:
         """
         path = self.artifacts_dir / "roc_data.json"
         if path.exists():
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return self._generate_sample_roc_data()
 
@@ -1206,7 +1206,7 @@ class DashboardDataLoader:
         """
         path = self.artifacts_dir / "confusion_matrices.json"
         if path.exists():
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return self._generate_sample_confusion_matrices()
 
@@ -1269,7 +1269,7 @@ class DashboardDataLoader:
         """
         path = self.artifacts_dir / "survival_curves.json"
         if path.exists():
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return self._generate_sample_survival_curves()
 

@@ -36,7 +36,7 @@ DEFAULT_FEATURE_STORE_DIR = PROJECT_ROOT / "data" / "feature_store"
 
 def load_config(config_path: Path) -> Dict[str, Any]:
     """Load simulator configuration from YAML."""
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -128,7 +128,7 @@ def run_make_dataset(
         "generation_summary": generation["summary"],
     }
     processed_dir.mkdir(parents=True, exist_ok=True)
-    with open(processed_dir / "dataset_summary.json", "w") as f:
+    with open(processed_dir / "dataset_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     return summary
 
