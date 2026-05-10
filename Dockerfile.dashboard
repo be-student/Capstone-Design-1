@@ -44,8 +44,14 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=20s \
     CMD curl -f http://localhost:8501/_stcore/health || exit 1
 
-# Run Streamlit dashboard
+# Run Streamlit dashboard.
+# `--server.runOnSave=true` makes the container hot-reload when the
+# bind-mounted `src/` changes. Without it, code edits land on disk but
+# the running interpreter keeps serving the stale module — silent
+# deploy failure that hides bug fixes from anyone who reloads the page.
 CMD ["streamlit", "run", "src/dashboard/app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \
-     "--server.headless=true"]
+     "--server.headless=true", \
+     "--server.runOnSave=true", \
+     "--server.fileWatcherType=poll"]

@@ -305,7 +305,7 @@ class RecommendationEngine:
         }
 
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, default=str)
 
         logger.info("RecommendationEngine saved to %s", path)
@@ -327,7 +327,7 @@ class RecommendationEngine:
         if not path.endswith(".json"):
             path = path + ".json"
 
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             state = json.load(f)
 
         engine = cls(state["config"])
@@ -412,14 +412,35 @@ class RecommendationEngine:
         return pd.DataFrame(records)
 
     def _no_action_mask(self, data: pd.DataFrame) -> pd.Series:
-        """Identify customers where retention intervention should be skipped."""
+        """Identify customers where retention intervention should be skipped.
+
+        Suppresses retention spend on three groups:
+          1. Negative-uplift customers (sleeping dogs by uplift sign).
+          2. Anyone tagged ``sleeping_dog`` *or* ``sure_thing`` in either
+             the value-uplift segment or the raw uplift segment columns.
+             ``sure_thing`` customers (low churn risk + low uplift) would
+             be retained anyway; issuing a coupon is pure margin
+             cannibalization.
+          3. Customers whose churn probability is below a low-risk
+             threshold (default 0.20). This catches sure_things that the
+             segmentation step did not label, e.g. customers with
+             ``churn_probability < 0.05`` but a slightly positive uplift.
+        """
         uplift = data.get("uplift_score", pd.Series(0.0, index=data.index)).astype(float)
         mask = uplift <= 0
         for col in ("segment", "uplift_segment"):
             if col in data.columns:
                 mask = mask | data[col].astype(str).str.contains(
-                    "sleeping_dog", case=False, na=False
+                    r"sleeping_dog|sure_thing", case=False, na=False, regex=True
                 )
+        if "churn_probability" in data.columns:
+            risk = data["churn_probability"].astype(float)
+            low_risk_threshold = float(
+                self.config.get("recommendations", {}).get(
+                    "low_risk_skip_threshold", 0.20
+                )
+            )
+            mask = mask | (risk < low_risk_threshold)
         return mask
 
     def _apply_no_action_policy(

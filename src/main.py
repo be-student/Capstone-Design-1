@@ -1146,23 +1146,86 @@ def _compute_features(
     from src.features import FeatureEngineer
 
     fe = FeatureEngineer(config)
-    sim_days = config.get("simulation", {}).get("simulation_days", 365)
-    start = config.get("simulation", {}).get("start_date", "2024-01-01")
-    ref_date = pd.Timestamp(start) + pd.Timedelta(days=sim_days)
-    features = fe.compute_all_features(customers, events, str(ref_date.date()))
+    cutoff = _observation_cutoff(config)
+    events_pre_cutoff = _filter_events_to_cutoff(events, cutoff)
+    logger.info(
+        "Feature observation cutoff T=%s; using %d/%d events <= T",
+        cutoff.date(), len(events_pre_cutoff), len(events),
+    )
+
+    features = fe.compute_all_features(
+        customers, events_pre_cutoff, str(cutoff.date())
+    )
     _FEATURE_CACHE = features
     return features
 
 
+def _observation_cutoff(config: Dict[str, Any]) -> pd.Timestamp:
+    """Return the observation cutoff T = end_date - observation_window_days.
+
+    All training inputs (RFM features, sequence panels, monthly aggregates)
+    must be computed strictly from events with event_date <= T. The label
+    is determined by activity in (T, end_date]. Without this split,
+    `recency` (a feature computed at end_date) equals the same quantity
+    as the churn-label threshold, producing a tautological AUC ≈ 1.0.
+
+    The cutoff covers BOTH label windows (no_purchase OR no_login) so any
+    label-defining activity is excluded from feature/panel inputs.
+    """
+    sim_days = config.get("simulation", {}).get("simulation_days", 365)
+    start = config.get("simulation", {}).get("start_date", "2024-01-01")
+    end_date = pd.Timestamp(start) + pd.Timedelta(days=sim_days)
+    churn_cfg = config.get("churn_definition", {})
+    obs_window = int(churn_cfg.get(
+        "observation_window_days",
+        max(
+            int(churn_cfg.get("no_purchase_days", 30)),
+            int(churn_cfg.get("no_login_days", 60)),
+        ),
+    ))
+    return end_date - pd.Timedelta(days=obs_window)
+
+
+def _filter_events_to_cutoff(
+    events: pd.DataFrame, cutoff: pd.Timestamp
+) -> pd.DataFrame:
+    """Return events with event_date <= cutoff (drops post-cutoff rows)."""
+    if "event_date" not in events.columns:
+        return events
+    mask = pd.to_datetime(events["event_date"]) <= cutoff
+    return events[mask].copy()
+
+
 def _features_match_customers(features: pd.DataFrame, customers: pd.DataFrame) -> bool:
-    """Return True when cached features align with the current customer input."""
+    """Return True when cached features align with the current customer input.
+
+    Checks customer_id set AND the churn_label vector. Without the label
+    check a cached `features.csv` from a previous run can shadow newly
+    re-labelled customers — e.g. if `label_noise_rate` is changed, the
+    model would train on stale deterministic labels and report perfect
+    metrics that do not reflect the current customer file.
+    """
     if len(features) != len(customers):
         return False
     if "customer_id" not in features.columns or "customer_id" not in customers.columns:
         return True
     feature_ids = set(features["customer_id"].astype(str))
     customer_ids = set(customers["customer_id"].astype(str))
-    return feature_ids == customer_ids
+    if feature_ids != customer_ids:
+        return False
+    if "churn_label" in features.columns and "churn_label" in customers.columns:
+        merged = features[["customer_id", "churn_label"]].merge(
+            customers[["customer_id", "churn_label"]],
+            on="customer_id",
+            how="inner",
+            suffixes=("_features", "_customers"),
+        )
+        if len(merged) != len(features):
+            return False
+        if not (merged["churn_label_features"].astype(int)
+                == merged["churn_label_customers"].astype(int)).all():
+            return False
+    return True
 
 
 def _feature_cols(df: pd.DataFrame) -> List[str]:
@@ -1252,7 +1315,14 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
     try:
         from src.models.sequence_utils import create_sequences
 
-        panel = _feature_monthly_panel(events, features, fcols)
+        # CRITICAL: feed only pre-cutoff events into the DL sequence panel.
+        # Without this filter the monthly panel contains the SAME post-T
+        # purchase counts that define the churn label, so the DL/LSTM
+        # (which sees the panel directly) learns "if last-month
+        # purchase_count == 0 then churn=1" and posts AUC ≈ 0.99 — a
+        # leakage signature, not generalization.
+        events_pre_cutoff = _filter_events_to_cutoff(events, _observation_cutoff(config))
+        panel = _feature_monthly_panel(events_pre_cutoff, features, fcols)
         if not panel.empty and "customer_id" in features.columns:
             labels = features[["customer_id", "churn_label"]].drop_duplicates("customer_id")
             seq_payload = create_sequences(
@@ -1280,7 +1350,15 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
     except Exception as exc:
         logger.warning("Event sequence preparation failed; DL will use pseudo-sequences: %s", exc)
 
-    results: Dict[str, Any] = {"mode": "train"}
+    # `mode` describes the pipeline stage; metrics below are computed on
+    # the held-out test split (X_te/y_test), so the artifact's headline
+    # numbers reflect generalization, not training-set memorization.
+    results: Dict[str, Any] = {
+        "mode": "train",
+        "evaluation_split": "holdout",
+        "train_size": int(len(y_train)),
+        "test_size": int(len(y_test)),
+    }
 
     # ML
     logger.info("Training ML model...")
@@ -2141,7 +2219,22 @@ def run_survival(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
     fcols = _feature_cols(features)
     X = features[fcols]
 
-    if "recency" in X.columns:
+    # Cox PH duration: tenure_days (signup-to-event for churned customers,
+    # signup-to-now for active customers right-censored). Using `recency`
+    # as duration is structurally wrong — recency is a *feature* of
+    # current state, not a time-to-event measurement, and produces
+    # population-level median survival times an order of magnitude
+    # smaller than cohort retention curves on the same data.
+    if "tenure_days" in features.columns:
+        duration = features["tenure_days"].astype(float).clip(lower=1)
+    elif "tenure_days" in X.columns:
+        duration = X["tenure_days"].astype(float).clip(lower=1)
+    elif "recency" in X.columns:
+        # Fallback for older feature stores that did not compute tenure.
+        logger.warning(
+            "tenure_days missing; falling back to recency as Cox duration "
+            "(this conflates current state with time-to-event)."
+        )
         duration = X["recency"].clip(lower=1)
     else:
         duration = pd.Series(np.random.default_rng(42).integers(30, 365, len(X)))
@@ -2165,7 +2258,33 @@ def run_survival(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
         "num_events": int(event.sum()),
     }
     if surv_probs is not None:
-        out["median_survival_prob_90d"] = float(np.nanmedian(surv_probs))
+        # Two-KPI separation:
+        #  - survival_prob_at_90d_p50: the 50th percentile of S(90)
+        #    across customers. Reads as "the median customer has X
+        #    probability of still being alive at day 90". Collapses
+        #    toward 0 when many customers carry strong churn signals,
+        #    which is why it cannot be compared against cohort
+        #    retention rates.
+        #  - median_survival_days: per-customer time at which
+        #    S(t) = 0.5 (the moment half the cohort is expected to
+        #    have churned), aggregated by the population median. This
+        #    is the cohort-comparable KPI to surface on dashboards.
+        out["survival_prob_at_90d_p50"] = float(np.nanmedian(surv_probs))
+        # Backward-compat alias kept for any downstream consumer that
+        # already reads this key; new dashboards should prefer
+        # median_survival_days.
+        out["median_survival_prob_90d"] = out["survival_prob_at_90d_p50"]
+    try:
+        med_days = model.median_survival_time(X[surv_feats])
+        finite = med_days[np.isfinite(med_days)]
+        if finite.size:
+            out["median_survival_days"] = float(np.median(finite))
+            out["median_survival_days_p25"] = float(np.percentile(finite, 25))
+            out["median_survival_days_p75"] = float(np.percentile(finite, 75))
+        else:
+            out["median_survival_days"] = float("inf")
+    except Exception as exc:
+        logger.warning("median_survival_time failed: %s", exc)
     if model.cox_model is not None:
         out["concordance_index"] = float(model.cox_model.concordance_index_)
 

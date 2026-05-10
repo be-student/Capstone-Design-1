@@ -79,7 +79,7 @@ def load_config() -> Dict[str, Any]:
         Parsed configuration dictionary.
     """
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
     return {}
 
@@ -4445,6 +4445,45 @@ def main():
     page = pages[page_labels.index(selected_label)]
 
     data_loader = get_data_loader(config)
+
+    # Synthetic-data banner — surface mode + group-size validation so a
+    # viewer cannot mistake simulator output for real customer data.
+    gen_summary: Dict[str, Any] = {}
+    try:
+        if hasattr(data_loader, "load_generation_summary"):
+            gen_summary = data_loader.load_generation_summary() or {}
+        else:
+            from pathlib import Path as _Path
+            import json as _json
+            for candidate in (
+                _Path("data/raw/generation_summary.json"),
+                _Path("data/artifacts/generation_summary.json"),
+            ):
+                if candidate.exists():
+                    gen_summary = _json.loads(candidate.read_text(encoding="utf-8"))
+                    break
+    except Exception:
+        gen_summary = {}
+    if isinstance(gen_summary, dict) and gen_summary:
+        gen_mode = str(gen_summary.get("generation_mode", "")).lower()
+        validation = gen_summary.get("validation", {}) or {}
+        group_check = validation.get("group_size_check", {}) or {}
+        group_passed = bool(group_check.get("passed", True))
+        n_customers = gen_summary.get("num_customers")
+        if gen_mode == "small" or not group_passed:
+            st.warning(
+                f"⚠️ **Synthetic data — {gen_mode.upper() or 'UNKNOWN'} mode "
+                f"(n={n_customers}). Numbers shown are illustrative; they "
+                "do NOT represent production performance. Group-size "
+                f"validation: {'PASSED' if group_passed else 'FAILED'}.**",
+                icon="🧪",
+            )
+        else:
+            st.info(
+                f"Synthetic data — {gen_mode.upper() or 'unknown'} mode "
+                f"(n={n_customers}). All KPIs are simulator-generated.",
+                icon="🧪",
+            )
 
     # Sidebar info from config helpers
     sidebar_info = build_sidebar_info(config)
