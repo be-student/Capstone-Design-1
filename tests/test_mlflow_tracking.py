@@ -120,7 +120,7 @@ def lightweight_ml_boosters(monkeypatch):
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -182,18 +182,33 @@ def sample_artifact_data(tmp_path):
 
 @pytest.fixture
 def mlflow_tracker(config, tmp_path):
-    """Create an MLflow tracker instance with local backend."""
+    """Create an MLflow tracker instance with local backend.
+
+    Always ends any leaked active run on teardown so a test that forgets
+    `end_run()` doesn't poison the next test with "Run already active".
+    """
+    import mlflow
     from src.models.mlflow_tracking import MLflowTracker
 
     # Override tracking URI to use temporary directory
     tracker_config = config.copy()
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir(exist_ok=True)
     tracker_config["mlflow"] = {
-        "tracking_uri": f"sqlite:///{tmp_path / 'mlflow.db'}",
-        "artifact_location": str(tmp_path / "artifacts"),
+        "tracking_uri": f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}",
+        # MLflow's artifact registry needs a URI scheme; on Windows a raw
+        # `C:\...` path has no recognised scheme. Use file:// URI form.
+        "artifact_location": artifacts_dir.as_uri(),
         "experiment_name": "test_experiment",
     }
 
-    return MLflowTracker(tracker_config)
+    tracker = MLflowTracker(tracker_config)
+    try:
+        yield tracker
+    finally:
+        # Drain any active run regardless of test outcome.
+        while mlflow.active_run() is not None:
+            mlflow.end_run()
 
 
 # ---------------------------------------------------------------------------
@@ -814,7 +829,7 @@ class TestMLflowReproducibility:
         mlflow_tracker.start_run(run_name="config_run")
 
         config_path = tmp_path / "config_snapshot.yaml"
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f)
 
         mlflow_tracker.log_artifact(
@@ -894,7 +909,7 @@ class TestAutoLogTraining:
 
         # Simulate save creating a file
         def fake_save(path):
-            with open(path + ".joblib", "w") as f:
+            with open(path + ".joblib", "w", encoding="utf-8") as f:
                 f.write("dummy")
         mock_model.save = fake_save
 
@@ -978,9 +993,11 @@ class TestAutoLogTraining:
 
         monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
         test_config = config.copy()
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir(exist_ok=True)
         test_config["mlflow"] = {
-            "tracking_uri": f"sqlite:///{tmp_path / 'mlflow.db'}",
-            "artifact_location": str(tmp_path / "artifacts"),
+            "tracking_uri": f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}",
+            "artifact_location": artifacts_dir.as_uri(),
             "experiment_name": "pipeline_evidence_test",
             "log_models": True,
             "log_artifacts": True,
