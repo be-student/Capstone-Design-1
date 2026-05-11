@@ -1739,6 +1739,31 @@ def run_uplift(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, An
     plot_qini_curve(y, scores, treatment, save_path=qini_path)
     _publish_artifact(config, Path(qini_path))
 
+    # Persuadables 세그먼트 특성 분석 및 타겟팅 기준 도출
+    persuadable_analysis = UpliftModel.analyze_persuadables(
+        X,
+        scores,
+        segments,
+        baseline_churn_probability=baseline_churn,
+        customer_ids=cid,
+    )
+    _save_result_and_artifact(
+        persuadable_analysis["feature_lift"],
+        results_dir / "persuadable_feature_lift.csv",
+        config,
+    )
+    _save_result_and_artifact(
+        persuadable_analysis["top_customers"],
+        results_dir / "persuadable_top_customers.csv",
+        config,
+    )
+    logger.info(
+        "Persuadables: %d customers (%.1f%%), mean uplift=%.4f",
+        int(persuadable_analysis["summary"]["persuadable_count"]),
+        persuadable_analysis["summary"]["persuadable_rate"] * 100,
+        persuadable_analysis["summary"]["persuadable_mean_uplift"],
+    )
+
     return {"mode": "uplift", "status": "completed", "auuc": float(auuc),
             "selected_learner": selected,
             "learner_comparison": comparison_rows,
