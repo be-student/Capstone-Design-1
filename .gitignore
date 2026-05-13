@@ -52,3 +52,4 @@ require.md
 
 # One-off iteration screenshots / overview captures
 /iter*_overview*.png
+.gstack/
