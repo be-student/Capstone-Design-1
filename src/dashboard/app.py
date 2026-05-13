@@ -1120,6 +1120,95 @@ def render_segmentation(st_module, config: Dict, data_loader=None):
         )
         st.plotly_chart(fig_risk_seg, use_container_width=True)
 
+    # -----------------------------------------------------------------
+    # Priority Score by Segment (Uplift × CLV)
+    # -----------------------------------------------------------------
+    st.subheader(_tr("Retention Priority Score by Segment"))
+    seg_summary_path = (
+        data_loader._resolve_existing_path("segment_summary.csv")
+        if data_loader is not None
+        else None
+    )
+    seg_summary = None
+    if seg_summary_path is not None:
+        try:
+            seg_summary = pd.read_csv(seg_summary_path)
+        except Exception:
+            seg_summary = None
+
+    if seg_summary is not None and "avg_priority_score" in seg_summary.columns:
+        seg_summary_sorted = seg_summary.sort_values("avg_priority_score", ascending=True)
+
+        fig_priority = px.bar(
+            seg_summary_sorted,
+            x="avg_priority_score",
+            y="segment",
+            orientation="h",
+            title=_tr("Average Priority Score by Segment (Uplift × CLV)"),
+            color="avg_priority_score",
+            color_continuous_scale="Viridis",
+            text="avg_priority_score",
+            labels={
+                "avg_priority_score": _tr("Avg Priority Score"),
+                "segment": _tr("Segment"),
+            },
+        )
+        fig_priority.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig_priority.update_layout(coloraxis_showscale=False)
+        st.plotly_chart(fig_priority, use_container_width=True)
+
+        # Scatter: churn probability vs priority score, bubble = customer count
+        if {"avg_churn_probability", "count"}.issubset(seg_summary.columns):
+            fig_ps_scatter = px.scatter(
+                seg_summary,
+                x="avg_churn_probability",
+                y="avg_priority_score",
+                size="count",
+                color="segment",
+                text="segment",
+                title=_tr(
+                    "Priority Score vs Churn Probability per Segment "
+                    "(bubble = customer count)"
+                ),
+                labels={
+                    "avg_churn_probability": _tr("Avg Churn Probability"),
+                    "avg_priority_score": _tr("Avg Priority Score (Uplift × CLV)"),
+                },
+            )
+            fig_ps_scatter.update_traces(textposition="top center")
+            st.plotly_chart(fig_ps_scatter, use_container_width=True)
+    else:
+        # Fallback: compute avg priority_score from predictions if column exists
+        if "priority_score" in predictions.columns:
+            ps_by_seg = (
+                predictions.groupby("segment")["priority_score"]
+                .mean()
+                .reset_index()
+                .sort_values("priority_score", ascending=True)
+            )
+            fig_priority = px.bar(
+                ps_by_seg,
+                x="priority_score",
+                y="segment",
+                orientation="h",
+                title=_tr("Average Priority Score by Segment (Uplift × CLV)"),
+                color="priority_score",
+                color_continuous_scale="Viridis",
+                text="priority_score",
+                labels={
+                    "priority_score": _tr("Avg Priority Score"),
+                    "segment": _tr("Segment"),
+                },
+            )
+            fig_priority.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+            fig_priority.update_layout(coloraxis_showscale=False)
+            st.plotly_chart(fig_priority, use_container_width=True)
+        else:
+            st.info(_tr(
+                "Priority score data unavailable. Run the pipeline with "
+                "--mode segment to generate it."
+            ))
+
     # Segment details — iter11 P03 #1 fix:
     # The legacy config-driven 8-row table listed names that the runtime
     # segmenter does not actually emit (loyal_customer / potential_loyalist /
@@ -3200,6 +3289,31 @@ def render_uplift(st_module, config: Dict, data_loader=None):
     )
     fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
     fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray")
+    # Quadrant label annotations
+    quadrant_labels = [
+        dict(x=0.98, y=0.98, text="Persuadable", xanchor="right", yanchor="top",
+             bgcolor="rgba(46,204,113,0.15)", bordercolor="#2ecc71"),
+        dict(x=0.02, y=0.98, text="Sure Thing", xanchor="left", yanchor="top",
+             bgcolor="rgba(52,152,219,0.15)", bordercolor="#3498db"),
+        dict(x=0.02, y=0.02, text="Lost Cause", xanchor="left", yanchor="bottom",
+             bgcolor="rgba(149,165,166,0.15)", bordercolor="#95a5a6"),
+        dict(x=0.98, y=0.02, text="Sleeping Dog", xanchor="right", yanchor="bottom",
+             bgcolor="rgba(231,76,60,0.15)", bordercolor="#e74c3c"),
+    ]
+    for q in quadrant_labels:
+        fig_scatter.add_annotation(
+            x=q["x"], y=q["y"],
+            xref="paper", yref="paper",
+            text=f"<b>{q['text']}</b>",
+            showarrow=False,
+            font=dict(size=12),
+            bgcolor=q["bgcolor"],
+            bordercolor=q["bordercolor"],
+            borderwidth=1,
+            borderpad=4,
+            xanchor=q["xanchor"],
+            yanchor=q["yanchor"],
+        )
     st.plotly_chart(fig_scatter, use_container_width=True)
 
     # -----------------------------------------------------------------
