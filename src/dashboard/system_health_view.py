@@ -344,9 +344,39 @@ def check_mlflow_health(config: Dict) -> Dict[str, Any]:
             result["status"] = STATUS_DEGRADED
             result["error"] = "No experiments found on MLflow server"
 
-    except ImportError:
-        result["status"] = STATUS_DOWN
-        result["error"] = "mlflow package not installed"
+    except ImportError as e:
+        # The previous implementation reported every ImportError as
+        # "mlflow package not installed", which masked transitive-dep gaps
+        # (e.g. `alembic`, required by MLflow's SQLAlchemy backend during
+        # the first `search_experiments()` call on a sqlite tracking URI).
+        # Distinguish: only claim mlflow itself is missing when its name
+        # appears in the error; otherwise surface the actual missing module
+        # and mark the service degraded, not down.
+        missing = getattr(e, "name", "") or ""
+        message = str(e)
+        if missing == "mlflow" or "mlflow" in message.lower().split("'"):
+            result["status"] = STATUS_DOWN
+            result["error"] = "mlflow package not installed"
+        else:
+            result["status"] = STATUS_DEGRADED
+            actual = missing or message
+            result["error"] = (
+                f"MLflow dependency missing: {actual} "
+                "(install the missing transitive dep on the dashboard image)"
+            )
+    except ModuleNotFoundError as e:  # pragma: no cover - defensive
+        # Some MLflow code paths re-raise ModuleNotFoundError from inside
+        # the SQLAlchemy backend; treat the same as ImportError above.
+        missing = getattr(e, "name", "") or str(e)
+        if missing == "mlflow":
+            result["status"] = STATUS_DOWN
+            result["error"] = "mlflow package not installed"
+        else:
+            result["status"] = STATUS_DEGRADED
+            result["error"] = (
+                f"MLflow dependency missing: {missing} "
+                "(install the missing transitive dep on the dashboard image)"
+            )
     except Exception as e:
         result["status"] = STATUS_DOWN
         result["error"] = f"MLflow server not reachable: {e}"
@@ -477,15 +507,50 @@ def get_system_health_summary(
         try:
             drift_history = data_loader.load_drift_history()
             if drift_history is not None and not drift_history.empty:
-                latest_alert = drift_history.iloc[-1].get("alert_level")
-                drift_alert_level = (
-                    str(latest_alert).lower() if latest_alert else None
-                )
-                drift_status = _drift_alert_to_status(drift_alert_level)
-                if drift_status != STATUS_HEALTHY:
-                    drift_error = (
-                        f"Latest drift alert: {drift_alert_level}"
+                # Only the ``__overall__`` summary row should drive the
+                # aggregate rollup — per-feature rows are surfaced inside
+                # the drift page, not the system banner.
+                #
+                # Additionally, the first pipeline run writes its synthetic
+                # ``__overall__`` row with ``is_initial_check=True`` and a
+                # conservative ``alert_level="red"``, even when the actual
+                # PSI is well below the yellow threshold. Filtering those
+                # initial-check rows out prevents the System Health page
+                # from flashing "System Issues Detected" on day one of a
+                # fresh deployment (and on any later baseline reset).
+                drift_df = drift_history
+                if "feature_name" in drift_df.columns:
+                    drift_df = drift_df[
+                        drift_df["feature_name"] == "__overall__"
+                    ]
+                if (
+                    not drift_df.empty
+                    and "is_initial_check" in drift_df.columns
+                ):
+                    is_initial = drift_df["is_initial_check"].fillna(False)
+                    # Accept both bool and string representations ("True"/"False").
+                    is_initial = is_initial.apply(
+                        lambda v: str(v).strip().lower() == "true"
+                        if not isinstance(v, bool) else v
                     )
+                    drift_df = drift_df[~is_initial]
+
+                if drift_df.empty:
+                    # No informative overall row yet — treat as healthy and
+                    # let the drift page show the baseline-pending caption.
+                    drift_status = STATUS_HEALTHY
+                    drift_alert_level = None
+                    drift_error = "drift baseline not yet established"
+                else:
+                    latest_alert = drift_df.iloc[-1].get("alert_level")
+                    drift_alert_level = (
+                        str(latest_alert).lower() if latest_alert else None
+                    )
+                    drift_status = _drift_alert_to_status(drift_alert_level)
+                    if drift_status != STATUS_HEALTHY:
+                        drift_error = (
+                            f"Latest drift alert: {drift_alert_level}"
+                        )
         except Exception as exc:  # pragma: no cover - defensive
             drift_error = f"drift history unavailable: {exc}"
 
