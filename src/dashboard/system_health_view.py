@@ -12,9 +12,9 @@ All configurable parameters are sourced from config/simulator_config.yaml.
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import numpy as np
@@ -22,7 +22,94 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+# Defensive import — F1 may add helpers concurrently.
+try:  # pragma: no cover - import guard
+    from src.dashboard.utils.dashboard_helpers import format_count  # type: ignore
+except ImportError:  # pragma: no cover
+    def format_count(value: int) -> str:  # type: ignore[no-redef]
+        try:
+            return f"{int(value):,}"
+        except (TypeError, ValueError):
+            return str(value)
+
+try:  # pragma: no cover - import guard
+    from src.dashboard.utils.dashboard_helpers import drift_trend_guard  # type: ignore
+except ImportError:  # pragma: no cover
+    def drift_trend_guard(*_args, **_kwargs):  # type: ignore[no-redef]
+        # Default fallback: no veto (parent helper not yet committed).
+        return True, None
+
 logger = logging.getLogger(__name__)
+
+
+# -------------------------------------------------------------------------
+# i18n (iter15 AGENT D) — defensive import, module-level closure.
+# -------------------------------------------------------------------------
+try:
+    from src.dashboard.utils.dashboard_helpers import get_lang, tr
+
+    def _tr(s: str) -> str:
+        try:
+            return tr(s, get_lang())
+        except Exception:
+            return s
+except Exception:  # pragma: no cover - defensive fallback
+    def _tr(s: str) -> str:
+        return s
+
+
+# Maximum age (hours) before "Scoring Throughput (24h)" data is considered
+# stale relative to wall-clock; suppresses Oct-2024-vs-May-2026 drift split.
+THROUGHPUT_FRESHNESS_HOURS = 48
+
+# -------------------------------------------------------------------------
+# iter13 G4: defensive DashboardArtifact integration. G2 may not yet have
+# shipped — we import optimistically and fall back to legacy behavior.
+# -------------------------------------------------------------------------
+try:  # pragma: no cover - defensive import
+    from src.dashboard.data_loader import DashboardArtifact  # type: ignore
+except Exception:  # pragma: no cover
+    DashboardArtifact = None  # type: ignore[assignment]
+
+
+def _load_artifact_safely(loader_callable, *args, **kwargs):
+    """Try a data_loader method with ``as_artifact=True`` (legacy-safe).
+
+    Returns ``(payload, artifact_or_none)``. Falls back to the legacy
+    return shape when the loader does not yet accept ``as_artifact``.
+    """
+    if loader_callable is None:
+        return None, None
+    try:
+        result = loader_callable(*args, as_artifact=True, **kwargs)
+    except TypeError:
+        try:
+            payload = loader_callable(*args, **kwargs)
+        except Exception:
+            return None, None
+        return payload, None
+    except Exception:
+        return None, None
+    payload = getattr(result, "data", result)
+    return payload, result
+
+
+def _artifact_marked_unreal(artifact: Any) -> bool:
+    """Return True when ``artifact.is_real`` is explicitly False."""
+    if artifact is None:
+        return False
+    is_real = getattr(artifact, "is_real", None)
+    if is_real is None:
+        return False
+    return bool(is_real) is False
+
+
+def _artifact_reason(artifact: Any) -> Optional[str]:
+    """Return ``artifact.reason`` when present, else None."""
+    if artifact is None:
+        return None
+    reason = getattr(artifact, "reason", None)
+    return str(reason) if reason else None
 
 # Service status constants
 STATUS_HEALTHY = "healthy"
@@ -144,6 +231,11 @@ def check_redis_health(config: Dict) -> Dict[str, Any]:
 def check_mlflow_health(config: Dict) -> Dict[str, Any]:
     """Check MLflow tracking server health.
 
+    Single source of truth used by both Page 15 KPI cards and the Page 14
+    banner copy (rendered via :func:`mlflow_status_banner`). "Connected"
+    requires an actual MLflow API round-trip that returns at least one
+    experiment — opening a sqlite file is not sufficient (defect a4 P14↔P15).
+
     Args:
         config: Configuration dictionary with mlflow section.
 
@@ -168,34 +260,39 @@ def check_mlflow_health(config: Dict) -> Dict[str, Any]:
 
     parsed_uri = urlparse(tracking_uri)
 
-    if parsed_uri.scheme == "sqlite":
-        db_path = Path(parsed_uri.path)
-        result["connected"] = db_path.exists()
-        result["status"] = STATUS_DEGRADED
-        if db_path.exists():
-            result["status"] = STATUS_HEALTHY
-        else:
-            result["error"] = f"MLflow tracking DB not found: {db_path}"
-        return result
-
     if parsed_uri.scheme in {"http", "https"}:
         health_url = tracking_uri.rstrip("/") + "/health"
         try:
             import requests
 
             response = requests.get(health_url, timeout=1)
-            result["connected"] = response.ok
-            result["status"] = STATUS_HEALTHY if response.ok else STATUS_DEGRADED
             if not response.ok:
-                result["error"] = f"MLflow health endpoint returned {response.status_code}"
+                result["status"] = STATUS_DEGRADED
+                result["error"] = (
+                    f"MLflow health endpoint returned {response.status_code}"
+                )
+                return result
         except ImportError:
             result["status"] = STATUS_DEGRADED
             result["error"] = "requests package not installed"
+            return result
         except Exception as e:
             result["status"] = STATUS_DEGRADED
             result["error"] = f"MLflow server not reachable: {e}"
-        return result
+            return result
+        # HTTP /health passed — fall through to API probe for canonical answer.
 
+    if parsed_uri.scheme == "sqlite":
+        db_path = Path(parsed_uri.path)
+        if not db_path.exists():
+            result["status"] = STATUS_DOWN
+            result["error"] = f"MLflow tracking DB not found: {db_path}"
+            return result
+        # File exists, but we still require a successful API probe below.
+
+    # Canonical API probe — same call path Page 14 uses to decide whether
+    # to show "MLflow tracking server not available". Connected ⇔ at least
+    # one experiment is returned via the mlflow client.
     try:
         import mlflow
 
@@ -240,19 +337,37 @@ def check_mlflow_health(config: Dict) -> Dict[str, Any]:
             except Exception:
                 pass
         else:
-            result["connected"] = True
+            # API reachable but registry empty — degraded, NOT connected.
+            # Page 14 will display the "tracking server not available /
+            # showing cached data" banner; Page 15 must agree (defect a4).
+            result["connected"] = False
             result["status"] = STATUS_DEGRADED
-            result["error"] = "No experiments found"
+            result["error"] = "No experiments found on MLflow server"
 
     except ImportError:
+        result["status"] = STATUS_DOWN
         result["error"] = "mlflow package not installed"
     except Exception as e:
-        result["error"] = str(e)
-        # Try artifacts-based fallback
-        result["status"] = STATUS_DEGRADED
+        result["status"] = STATUS_DOWN
         result["error"] = f"MLflow server not reachable: {e}"
 
     return result
+
+
+def mlflow_status_banner(mlflow_health: Dict[str, Any]) -> Tuple[str, str]:
+    """Return canonical (level, message) for the MLflow status banner.
+
+    Centralised so Page 14 and Page 15 cannot drift. ``level`` is one of
+    ``"success" | "warning" | "error"`` and matches Streamlit's banner API.
+    """
+    if mlflow_health.get("connected"):
+        return "success", "Connected to MLflow tracking server"
+    err = mlflow_health.get("error") or "tracking server not reachable"
+    return (
+        "warning",
+        f"MLflow tracking server not available ({err}) — "
+        "showing cached experiment data from artifacts.",
+    )
 
 
 def check_pipeline_health(config: Dict) -> Dict[str, Any]:
@@ -319,11 +434,34 @@ def check_pipeline_health(config: Dict) -> Dict[str, Any]:
     return result
 
 
-def get_system_health_summary(config: Dict) -> Dict[str, Any]:
+def _drift_alert_to_status(alert_level: Optional[str]) -> str:
+    """Map a drift alert level (green/yellow/red) onto a service status."""
+    if not alert_level:
+        return STATUS_HEALTHY
+    level = str(alert_level).lower()
+    if level == "green":
+        return STATUS_HEALTHY
+    if level == "yellow":
+        return STATUS_DEGRADED
+    if level == "red":
+        return STATUS_DOWN
+    return STATUS_DEGRADED
+
+
+def get_system_health_summary(
+    config: Dict,
+    data_loader: Any = None,
+) -> Dict[str, Any]:
     """Get comprehensive system health summary.
+
+    Aggregate health propagates the WORST child state, including the
+    model-drift subsystem (defect a4 P15: header was green while
+    Drift=RED). Pass ``data_loader`` so drift history can be folded in;
+    when omitted the rollup falls back to infrastructure services only.
 
     Args:
         config: Configuration dictionary.
+        data_loader: Optional DashboardDataLoader for drift status.
 
     Returns:
         Dict with service statuses, overall health, and timestamp.
@@ -332,18 +470,45 @@ def get_system_health_summary(config: Dict) -> Dict[str, Any]:
     mlflow_health = check_mlflow_health(config)
     pipeline_health = check_pipeline_health(config)
 
+    drift_status = STATUS_HEALTHY
+    drift_alert_level: Optional[str] = None
+    drift_error: Optional[str] = None
+    if data_loader is not None:
+        try:
+            drift_history = data_loader.load_drift_history()
+            if drift_history is not None and not drift_history.empty:
+                latest_alert = drift_history.iloc[-1].get("alert_level")
+                drift_alert_level = (
+                    str(latest_alert).lower() if latest_alert else None
+                )
+                drift_status = _drift_alert_to_status(drift_alert_level)
+                if drift_status != STATUS_HEALTHY:
+                    drift_error = (
+                        f"Latest drift alert: {drift_alert_level}"
+                    )
+        except Exception as exc:  # pragma: no cover - defensive
+            drift_error = f"drift history unavailable: {exc}"
+
+    drift_health = {
+        "status": drift_status,
+        "alert_level": drift_alert_level,
+        "error": drift_error,
+    }
+
     statuses = [
         redis_health["status"],
         mlflow_health["status"],
         pipeline_health["status"],
+        drift_status,
     ]
 
-    if all(s == STATUS_HEALTHY for s in statuses):
-        overall = STATUS_HEALTHY
-    elif any(s == STATUS_DOWN for s in statuses):
+    # Worst-child propagation: any DOWN ⇒ DOWN, any DEGRADED ⇒ DEGRADED.
+    if any(s == STATUS_DOWN for s in statuses):
+        overall = STATUS_DOWN
+    elif any(s == STATUS_DEGRADED for s in statuses):
         overall = STATUS_DEGRADED
     else:
-        overall = STATUS_DEGRADED
+        overall = STATUS_HEALTHY
 
     return {
         "overall_status": overall,
@@ -352,6 +517,7 @@ def get_system_health_summary(config: Dict) -> Dict[str, Any]:
             "redis": redis_health,
             "mlflow": mlflow_health,
             "pipeline": pipeline_health,
+            "drift": drift_health,
         },
     }
 
@@ -373,18 +539,28 @@ def render_system_health(st_module, config: Dict, data_loader=None):
         data_loader: Optional DashboardDataLoader instance.
     """
     st = st_module
-    st.header("System Overview & Health")
-    st.markdown(
+    st.header(_tr("System Overview & Health"))
+    st.markdown(_tr(
         "Real-time health monitoring for all system components: "
         "streaming pipeline, ML tracking, and model serving."
-    )
+    ))
 
     if data_loader is None:
         from src.dashboard.app import get_data_loader
         data_loader = get_data_loader(config)
 
-    # Gather health data
-    health = get_system_health_summary(config)
+    # Gather health data — pass data_loader so drift status is folded into
+    # the aggregate rollup (defect a4: header was green while Drift=RED).
+    health = get_system_health_summary(config, data_loader=data_loader)
+
+    # Pre-load mlflow runs once so the service card and the run-history
+    # section share a single source of truth (defect a4 P15: Experiments=0
+    # vs Total Runs=3 came from two independent code paths). iter13 G4:
+    # probe with as_artifact=True so we can detect the "cached fallback"
+    # case and surface it on the MLflow service card.
+    mlflow_runs_df, mlflow_runs_artifact = _load_artifact_safely(
+        getattr(data_loader, "load_mlflow_runs", None),
+    )
 
     # ==================================================================
     # Section 1: Overall Health Status
@@ -395,7 +571,12 @@ def render_system_health(st_module, config: Dict, data_loader=None):
     # Section 2: Service Status Cards
     # ==================================================================
     st.markdown("---")
-    _render_service_cards(st, health)
+    _render_service_cards(
+        st,
+        health,
+        mlflow_runs_df=mlflow_runs_df,
+        mlflow_runs_artifact=mlflow_runs_artifact,
+    )
 
     # ==================================================================
     # Section 3: Streaming Pipeline Status
@@ -407,7 +588,9 @@ def render_system_health(st_module, config: Dict, data_loader=None):
     # Section 4: MLflow Experiment Tracking
     # ==================================================================
     st.markdown("---")
-    _render_mlflow_tracking(st, config, health, data_loader)
+    _render_mlflow_tracking(
+        st, config, health, data_loader, mlflow_runs_df=mlflow_runs_df,
+    )
 
     # ==================================================================
     # Section 5: Model Health & Drift Summary
@@ -427,26 +610,80 @@ def render_system_health(st_module, config: Dict, data_loader=None):
 # =========================================================================
 
 
+def _throughput_freshness(
+    throughput: pd.DataFrame,
+) -> Tuple[Optional[pd.Timestamp], Optional[float]]:
+    """Return (latest_timestamp, age_in_hours) for a throughput frame.
+
+    Falls back to (None, None) when the frame has no usable timestamp
+    column. Age is measured against ``datetime.now()`` and is naive on
+    purpose to match the un-tz'd fixture timestamps.
+    """
+    if throughput is None or throughput.empty:
+        return None, None
+    if "timestamp" not in throughput.columns:
+        return None, None
+    try:
+        ts = pd.to_datetime(throughput["timestamp"], errors="coerce")
+        ts = ts.dropna()
+        if ts.empty:
+            return None, None
+        latest = ts.max()
+        # Strip timezone for a uniform comparison.
+        if getattr(latest, "tzinfo", None) is not None:
+            latest = latest.tz_convert(None)
+        now = pd.Timestamp(datetime.now())
+        age = (now - latest).total_seconds() / 3600.0
+        return latest, age
+    except Exception:  # pragma: no cover - defensive
+        return None, None
+
+
 def _render_overall_health(st, health: Dict):
-    """Render overall system health banner."""
+    """Render overall system health banner.
+
+    Worst-child propagation: header turns yellow (Degraded) when any
+    subsystem is degraded, red (Issues Detected) when any subsystem is
+    down — including the drift child folded in by
+    :func:`get_system_health_summary` (defect a4 P15).
+    """
     overall = health["overall_status"]
     icon = STATUS_ICONS.get(overall, "❓")
-    color = STATUS_COLORS.get(overall, "#95a5a6")
     timestamp = health.get("timestamp", "N/A")
 
     status_text = {
-        STATUS_HEALTHY: "All Systems Operational",
-        STATUS_DEGRADED: "Some Services Degraded",
-        STATUS_DOWN: "System Issues Detected",
+        STATUS_HEALTHY: _tr("All Systems Operational"),
+        STATUS_DEGRADED: _tr("Degraded — Investigate Subsystems"),
+        STATUS_DOWN: _tr("System Issues Detected"),
     }
 
-    st.markdown(
-        f"### {icon} System Status: **{status_text.get(overall, 'Unknown')}**"
+    headline = (
+        f"### {icon} {_tr('System Status')}: "
+        f"**{status_text.get(overall, _tr('Unknown'))}**"
     )
-    st.caption(f"Last checked: {timestamp}")
+    if overall == STATUS_HEALTHY:
+        st.markdown(headline)
+    elif overall == STATUS_DEGRADED:
+        st.warning(headline)
+    else:
+        st.error(headline)
+
+    # Surface which subsystem(s) dragged the rollup down so the headline
+    # cannot silently disagree with a child card (defect a4 P15).
+    services = health.get("services", {})
+    bad_children = [
+        name for name, svc in services.items()
+        if svc.get("status") in (STATUS_DEGRADED, STATUS_DOWN)
+    ]
+    if bad_children:
+        st.caption(
+            f"{_tr('Non-healthy subsystems')}: "
+            + ", ".join(sorted(bad_children))
+        )
+
+    st.caption(f"{_tr('Last checked')}: {timestamp}")
 
     # Service count summary
-    services = health.get("services", {})
     healthy_count = sum(
         1 for s in services.values() if s.get("status") == STATUS_HEALTHY
     )
@@ -454,21 +691,40 @@ def _render_overall_health(st, health: Dict):
 
     st.progress(
         healthy_count / max(total_count, 1),
-        text=f"{healthy_count}/{total_count} services healthy",
+        text=(
+            f"{format_count(healthy_count)}/{format_count(total_count)} "
+            + _tr("subsystems healthy")
+        ),
     )
 
 
-def _render_service_cards(st, health: Dict):
-    """Render individual service health cards."""
-    st.subheader("Service Health")
+def _render_service_cards(
+    st,
+    health: Dict,
+    mlflow_runs_df=None,
+    mlflow_runs_artifact: Any = None,
+):
+    """Render individual service health cards.
+
+    ``mlflow_runs_df`` is the canonical run table loaded by the page; it
+    is used to reconcile the Experiments KPI with the Run-History KPI on
+    the same page (defect a4 P15 contradiction A: Experiments=0 vs
+    Total Runs=3 from two different code paths).
+
+    ``mlflow_runs_artifact`` (iter13 G4) is the optional DashboardArtifact
+    wrapper from G2's loader. When ``is_real=False`` it tells the card
+    "this run table is cached — not live MLflow API output" so the card
+    can append an explicit "Experiments cached: N rows" line.
+    """
+    st.subheader(_tr("Service Health"))
 
     services = health.get("services", {})
     cols = st.columns(3)
 
     service_display = [
-        ("redis", "Redis Streaming", "Handles real-time scoring requests"),
-        ("mlflow", "MLflow Tracking", "Experiment tracking & model registry"),
-        ("pipeline", "ML Pipeline", "Model training & artifact storage"),
+        ("redis", _tr("Redis Streaming"), _tr("Handles real-time scoring requests")),
+        ("mlflow", _tr("MLflow Tracking"), _tr("Experiment tracking & model registry")),
+        ("pipeline", _tr("ML Pipeline"), _tr("Model training & artifact storage")),
     ]
 
     for i, (key, name, desc) in enumerate(service_display):
@@ -492,34 +748,90 @@ def _render_service_cards(st, health: Dict):
 
             # Service-specific details
             if key == "redis":
-                st.metric(
-                    "Connected",
-                    "Yes" if svc.get("connected") else "No",
-                )
+                connected = bool(svc.get("connected"))
                 streams = svc.get("stream_lengths", {})
+                total_msgs = sum(streams.values()) if streams else 0
+                # Hollow-health guard (defect a4): "Connected: Yes" with
+                # zero traffic should read as idle, not healthy.
+                if connected and total_msgs == 0:
+                    conn_label = _tr("Yes (idle — no traffic)")
+                else:
+                    conn_label = _tr("Yes") if connected else _tr("No")
+                st.metric(_tr("Connected"), conn_label)
                 for stream_name, length in streams.items():
                     short_name = stream_name.split("_")[-1]
-                    st.metric(f"Stream ({short_name})", f"{length:,}")
+                    st.metric(
+                        f"{_tr('Stream')} ({short_name})",
+                        format_count(int(length)),
+                    )
 
             elif key == "mlflow":
-                st.metric(
-                    "Connected",
-                    "Yes" if svc.get("connected") else "No",
-                )
-                exp_count = len(svc.get("experiments", []))
-                st.metric("Experiments", exp_count)
+                # Reconcile with Run-History KPI: prefer the canonical
+                # mlflow_runs DataFrame (same source as Total Runs) when
+                # the live API call returned an empty experiments list.
+                live_experiments = svc.get("experiments", []) or []
+                exp_from_health = len(live_experiments)
+
+                runs_experiment_count = 0
+                runs_total = 0
+                if mlflow_runs_df is not None and not mlflow_runs_df.empty:
+                    runs_total = len(mlflow_runs_df)
+                    if "experiment_id" in mlflow_runs_df.columns:
+                        runs_experiment_count = int(
+                            mlflow_runs_df["experiment_id"].nunique()
+                        )
+                    elif "experiment_name" in mlflow_runs_df.columns:
+                        runs_experiment_count = int(
+                            mlflow_runs_df["experiment_name"].nunique()
+                        )
+                    else:
+                        # Cached snapshot exposes runs but not the
+                        # experiment id; treat as a single experiment so
+                        # "0 experiments / 3 runs" can never happen.
+                        runs_experiment_count = 1
+
+                exp_count = max(exp_from_health, runs_experiment_count)
+                connected = bool(svc.get("connected")) and exp_count > 0
+                if connected and runs_total == 0:
+                    conn_label = _tr("Yes (idle — no runs logged)")
+                elif not connected and runs_total > 0:
+                    conn_label = _tr("No (showing cached runs)")
+                else:
+                    conn_label = _tr("Yes") if connected else _tr("No")
+                st.metric(_tr("Connected"), conn_label)
+                st.metric(_tr("Experiments"), format_count(exp_count))
+                st.metric(_tr("Total Runs"), format_count(runs_total))
+
+                # iter13 G4: when the loader explicitly tells us the
+                # run table is a cached fallback (is_real=False), show
+                # how many rows we are displaying so the operator can
+                # see that "Connected: No" is paired with cached data.
+                if (
+                    _artifact_marked_unreal(mlflow_runs_artifact)
+                    and runs_total > 0
+                ):
+                    st.caption(
+                        f"{_tr('Experiments cached')}: "
+                        f"{format_count(runs_total)} {_tr('rows')}"
+                    )
+                    cached_reason = _artifact_reason(mlflow_runs_artifact)
+                    if cached_reason:
+                        st.caption(f"{_tr('Reason')}: {cached_reason}")
 
             elif key == "pipeline":
-                st.metric("Artifacts", svc.get("artifact_count", 0))
+                artifacts = int(svc.get("artifact_count", 0))
                 models = svc.get("models_available", [])
-                st.metric("Models", len(models))
+                st.metric(_tr("Artifacts"), format_count(artifacts))
+                st.metric(_tr("Models"), format_count(len(models)))
+                if artifacts == 0 and not models:
+                    st.caption(_tr("Pipeline idle — no artifacts or models."))
 
 
 def _render_streaming_status(
     st, config: Dict, health: Dict, data_loader,
 ):
     """Render streaming pipeline status section."""
-    st.subheader("Streaming Pipeline Status")
+    st.subheader(_tr("Streaming Pipeline Status"))
 
     redis_health = health.get("services", {}).get("redis", {})
     redis_config = resolve_redis_connection_config(config)
@@ -528,7 +840,7 @@ def _render_streaming_status(
     col_config, col_metrics = st.columns(2)
 
     with col_config:
-        st.markdown("#### Configuration")
+        st.markdown(f"#### {_tr('Configuration')}")
         st.json({
             "host": redis_config["host"],
             "port": redis_config["port"],
@@ -541,87 +853,127 @@ def _render_streaming_status(
         })
 
     with col_metrics:
-        st.markdown("#### Stream Metrics")
+        st.markdown(f"#### {_tr('Stream Metrics')}")
         streams = redis_health.get("stream_lengths", {})
 
         if streams:
             stream_df = pd.DataFrame([
-                {"Stream": name, "Length": length}
+                {_tr("Stream"): name, _tr("Length"): length}
                 for name, length in streams.items()
             ])
             fig_streams = px.bar(
-                stream_df, x="Stream", y="Length",
-                title="Stream Lengths",
-                color="Stream",
-                text="Length",
+                stream_df, x=_tr("Stream"), y=_tr("Length"),
+                title=_tr("Stream Lengths"),
+                color=_tr("Stream"),
+                text=_tr("Length"),
             )
             fig_streams.update_traces(textposition="outside")
             st.plotly_chart(fig_streams, use_container_width=True)
         else:
-            st.info(
+            st.info(_tr(
                 "Redis not connected. Stream metrics unavailable. "
                 "Start Redis with `docker-compose up redis`."
-            )
+            ))
 
     # Consumer group details
     consumer_groups = redis_health.get("consumer_groups", {})
     if any(consumer_groups.values()):
-        st.markdown("#### Consumer Groups")
+        st.markdown(f"#### {_tr('Consumer Groups')}")
         group_rows = []
         for stream, groups in consumer_groups.items():
             for g in groups:
                 group_rows.append({
-                    "Stream": stream,
-                    "Group": g.get("name", "N/A"),
-                    "Consumers": g.get("consumers", 0),
-                    "Pending Messages": g.get("pending", 0),
+                    _tr("Stream"): stream,
+                    _tr("Group"): g.get("name", "N/A"),
+                    _tr("Consumers"): g.get("consumers", 0),
+                    _tr("Pending Messages"): g.get("pending", 0),
                 })
         if group_rows:
             st.dataframe(pd.DataFrame(group_rows), use_container_width=True)
 
-    # Throughput chart from data loader
-    throughput = data_loader.load_scoring_throughput()
-    if not throughput.empty:
-        st.markdown("#### Scoring Throughput (24h)")
-        fig_tp = go.Figure()
-        fig_tp.add_trace(go.Scatter(
-            x=throughput["timestamp"],
-            y=throughput["requests_per_minute"],
-            mode="lines",
-            name="Requests/min",
-            line=dict(color="#2ecc71", width=2),
-            fill="tozeroy",
-            fillcolor="rgba(46,204,113,0.1)",
-        ))
-        fig_tp.update_layout(
-            xaxis_title="Time",
-            yaxis_title="Requests per Minute",
-            height=300,
-        )
-        st.plotly_chart(fig_tp, use_container_width=True)
+    # Throughput chart from data loader. The cached fixture is dated
+    # Oct 2024 while the drift charts are dated today; rather than render
+    # an Oct-2024 24h line beside a "May 2026" drift trend (defect a4
+    # time-anchor split), we surface the freshness gap explicitly and
+    # only show the chart when the data is recent.
+    throughput, throughput_artifact = _load_artifact_safely(
+        getattr(data_loader, "load_scoring_throughput", None),
+    )
+    if throughput is None:
+        throughput = pd.DataFrame()
 
-        # Throughput summary
-        tp1, tp2, tp3 = st.columns(3)
-        tp1.metric(
-            "Avg Throughput",
-            f"{throughput['requests_per_minute'].mean():.1f} req/min",
+    # iter13 G4: skip the chart entirely and surface a hard error when
+    # the loader reports the underlying artifact is NOT real (closes the
+    # iter12 audit finding for Page 15 throughput tile).
+    if _artifact_marked_unreal(throughput_artifact):
+        st.markdown(f"#### {_tr('Scoring Throughput')}")
+        st.error(_tr(
+            "Real scoring throughput missing — run pipeline to populate "
+            "`results/scoring_throughput.csv`."
+        ))
+        reason = _artifact_reason(throughput_artifact)
+        if reason:
+            st.caption(f"{_tr('Reason')}: {reason}")
+    elif not throughput.empty:
+        last_ts, age_hours = _throughput_freshness(throughput)
+        last_label = (
+            last_ts.isoformat() if last_ts is not None else _tr("unknown")
         )
-        tp2.metric(
-            "Avg Latency",
-            f"{throughput['avg_latency_ms'].mean():.1f} ms",
-        )
-        if "error_rate" in throughput.columns:
-            tp3.metric(
-                "Avg Error Rate",
-                f"{throughput['error_rate'].mean():.4f}",
+        is_stale = age_hours is None or age_hours > THROUGHPUT_FRESHNESS_HOURS
+
+        if is_stale:
+            st.markdown(f"#### {_tr('Scoring Throughput')}")
+            st.warning(
+                f"{_tr('Throughput telemetry is stale')} "
+                f"({_tr('last sample')}: {last_label}). "
+                f"{_tr('Chart suppressed to avoid a time-anchor split with the drift trend below. Restart the scoring pipeline to refresh.')}"
             )
+        else:
+            st.markdown(f"#### {_tr('Scoring Throughput (last 24h)')}")
+            st.caption(f"{_tr('Last refresh')}: {last_label}")
+            fig_tp = go.Figure()
+            fig_tp.add_trace(go.Scatter(
+                x=throughput["timestamp"],
+                y=throughput["requests_per_minute"],
+                mode="lines",
+                name=_tr("Requests/min"),
+                line=dict(color="#2ecc71", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(46,204,113,0.1)",
+            ))
+            fig_tp.update_layout(
+                xaxis_title=_tr("Time"),
+                yaxis_title=_tr("Requests per Minute"),
+                height=300,
+            )
+            st.plotly_chart(fig_tp, use_container_width=True)
+
+            # Throughput summary
+            tp1, tp2, tp3 = st.columns(3)
+            tp1.metric(
+                _tr("Avg Throughput"),
+                f"{throughput['requests_per_minute'].mean():.1f} req/min",
+            )
+            tp2.metric(
+                _tr("Avg Latency"),
+                f"{throughput['avg_latency_ms'].mean():.1f} ms",
+            )
+            if "error_rate" in throughput.columns:
+                tp3.metric(
+                    _tr("Avg Error Rate"),
+                    f"{throughput['error_rate'].mean():.4f}",
+                )
 
 
 def _render_mlflow_tracking(
-    st, config: Dict, health: Dict, data_loader,
+    st, config: Dict, health: Dict, data_loader, mlflow_runs_df=None,
 ):
-    """Render MLflow experiment tracking integration section."""
-    st.subheader("MLflow Experiment Tracking")
+    """Render MLflow experiment tracking integration section.
+
+    Banner copy is sourced from :func:`mlflow_status_banner` so Page 15
+    cannot disagree with Page 14 (defect a4 cross-page contradiction).
+    """
+    st.subheader(_tr("MLflow Experiment Tracking"))
 
     mlflow_health = health.get("services", {}).get("mlflow", {})
     mlflow_config = config.get("mlflow", {})
@@ -630,13 +982,13 @@ def _render_mlflow_tracking(
     col_status, col_info = st.columns(2)
 
     with col_status:
-        if mlflow_health.get("connected"):
-            st.success("Connected to MLflow tracking server")
+        level, message = mlflow_status_banner(mlflow_health)
+        if level == "success":
+            st.success(_tr(message))
+        elif level == "error":
+            st.error(_tr(message))
         else:
-            st.warning(
-                "MLflow server not available. "
-                "Showing cached data from artifacts."
-            )
+            st.warning(_tr(message))
         st.json({
             "tracking_uri": mlflow_health.get("tracking_uri", "N/A"),
             "experiment_name": mlflow_health.get("experiment_name", "N/A"),
@@ -648,37 +1000,44 @@ def _render_mlflow_tracking(
         # Experiment list
         experiments = mlflow_health.get("experiments", [])
         if experiments:
-            st.markdown("#### Registered Experiments")
+            st.markdown(f"#### {_tr('Registered Experiments')}")
             st.dataframe(
                 pd.DataFrame(experiments),
                 use_container_width=True,
             )
         else:
-            st.info("No experiments found on MLflow server.")
+            st.info(_tr(
+                "No experiments returned by the MLflow server. "
+                "Run history below is loaded from cached artifacts."
+            ))
 
-    # MLflow run history from data loader
-    mlflow_runs = data_loader.load_mlflow_runs()
+    # Reuse the cached DataFrame so this section and the service card
+    # show the same Total Runs (defect a4 contradiction A).
+    if mlflow_runs_df is not None:
+        mlflow_runs = mlflow_runs_df
+    else:
+        mlflow_runs = data_loader.load_mlflow_runs()
 
     if not mlflow_runs.empty:
-        st.markdown("#### Experiment Run History")
+        st.markdown(f"#### {_tr('Experiment Run History')}")
 
         # KPI cards from runs
         kc1, kc2, kc3, kc4 = st.columns(4)
-        kc1.metric("Total Runs", len(mlflow_runs))
+        kc1.metric(_tr("Total Runs"), len(mlflow_runs))
 
         if "auc" in mlflow_runs.columns:
             best_auc = mlflow_runs["auc"].max()
-            kc2.metric("Best AUC", f"{best_auc:.4f}")
+            kc2.metric(_tr("Best AUC"), f"{best_auc:.4f}")
 
         if "model_type" in mlflow_runs.columns:
             best_model = mlflow_runs.loc[
                 mlflow_runs["auc"].idxmax(), "model_type"
             ] if "auc" in mlflow_runs.columns else "N/A"
-            kc3.metric("Best Model", best_model)
+            kc3.metric(_tr("Best Model"), best_model)
 
         if "training_time_s" in mlflow_runs.columns:
             total_time = mlflow_runs["training_time_s"].sum()
-            kc4.metric("Total Train Time", f"{total_time:.0f}s")
+            kc4.metric(_tr("Total Train Time"), f"{total_time:.0f}s")
 
         # Performance comparison chart
         col_perf, col_time = st.columns(2)
@@ -690,7 +1049,7 @@ def _render_mlflow_tracking(
                     x="model_type",
                     y="auc",
                     color="model_type",
-                    title="AUC by Model Type",
+                    title=_tr("AUC by Model Type"),
                     text=mlflow_runs.sort_values("auc", ascending=False)["auc"].apply(
                         lambda v: f"{v:.4f}"
                     ),
@@ -702,7 +1061,7 @@ def _render_mlflow_tracking(
                 )
                 fig_perf.add_hline(
                     y=0.78, line_dash="dash", line_color="red",
-                    annotation_text="Threshold (0.78)",
+                    annotation_text=f"{_tr('Threshold')} (0.78)",
                 )
                 st.plotly_chart(fig_perf, use_container_width=True)
 
@@ -714,12 +1073,12 @@ def _render_mlflow_tracking(
                     y="auc",
                     color="model_type" if "model_type" in mlflow_runs.columns else None,
                     size="training_time_s" if "training_time_s" in mlflow_runs.columns else None,
-                    title="Model Performance Over Time",
+                    title=_tr("Model Performance Over Time"),
                 )
                 st.plotly_chart(fig_timeline, use_container_width=True)
 
         # Run details table
-        st.markdown("#### Run Details")
+        st.markdown(f"#### {_tr('Run Details')}")
         display_cols = [
             c for c in [
                 "run_id", "model_type", "auc", "precision", "recall",
@@ -732,7 +1091,7 @@ def _render_mlflow_tracking(
 
 def _render_model_health(st, config: Dict, data_loader):
     """Render model health and drift detection summary."""
-    st.subheader("Model Health & Drift Detection")
+    st.subheader(_tr("Model Health & Drift Detection"))
 
     drift_history = data_loader.load_drift_history()
     model_metrics = data_loader.load_model_metrics()
@@ -745,11 +1104,17 @@ def _render_model_health(st, config: Dict, data_loader):
             alert_level = latest.get("alert_level", "unknown")
 
             if alert_level == "green":
-                st.success(f"Current Drift Status: **{alert_level.upper()}**")
+                st.success(
+                    f"{_tr('Current Drift Status')}: **{alert_level.upper()}**"
+                )
             elif alert_level == "yellow":
-                st.warning(f"Current Drift Status: **{alert_level.upper()}**")
+                st.warning(
+                    f"{_tr('Current Drift Status')}: **{alert_level.upper()}**"
+                )
             else:
-                st.error(f"Current Drift Status: **{alert_level.upper()}**")
+                st.error(
+                    f"{_tr('Current Drift Status')}: **{alert_level.upper()}**"
+                )
 
             # Recent drift trend
             fig_drift = go.Figure()
@@ -757,7 +1122,7 @@ def _render_model_health(st, config: Dict, data_loader):
                 x=drift_history["timestamp"],
                 y=drift_history["psi_mean"],
                 mode="lines+markers",
-                name="Mean PSI",
+                name=_tr("Mean PSI"),
                 line=dict(color="#3498db", width=2),
             ))
 
@@ -771,26 +1136,26 @@ def _render_model_health(st, config: Dict, data_loader):
                 line_dash="dash", line_color="#e74c3c",
             )
             fig_drift.update_layout(
-                title="PSI Drift Trend",
-                xaxis_title="Date",
-                yaxis_title="Mean PSI",
+                title=_tr("PSI Drift Trend"),
+                xaxis_title=_tr("Date"),
+                yaxis_title=_tr("Mean PSI"),
                 height=300,
             )
             st.plotly_chart(fig_drift, use_container_width=True)
         else:
-            st.info("No drift detection history available.")
+            st.info(_tr("No drift detection history available."))
 
     with col_perf:
         if model_metrics:
-            st.markdown("#### Current Model Performance")
+            st.markdown(f"#### {_tr('Current Model Performance')}")
             metrics_rows = []
             for model_name, metrics in model_metrics.items():
                 metrics_rows.append({
-                    "Model": model_name,
-                    "AUC": metrics.get("auc", 0),
-                    "Precision": metrics.get("precision", 0),
-                    "Recall": metrics.get("recall", 0),
-                    "F1": metrics.get("f1_score", 0),
+                    _tr("Model"): model_name,
+                    _tr("AUC"): metrics.get("auc", 0),
+                    _tr("Precision"): metrics.get("precision", 0),
+                    _tr("Recall"): metrics.get("recall", 0),
+                    _tr("F1"): metrics.get("f1_score", 0),
                 })
             metrics_df = pd.DataFrame(metrics_rows)
             st.dataframe(metrics_df, use_container_width=True)
@@ -801,22 +1166,22 @@ def _render_model_health(st, config: Dict, data_loader):
                 key=lambda m: model_metrics[m].get("auc", 0),
             )
             st.info(
-                f"Best model: **{best}** "
+                f"{_tr('Best model')}: **{best}** "
                 f"(AUC = {model_metrics[best].get('auc', 0):.4f})"
             )
         else:
-            st.info("No model performance metrics available.")
+            st.info(_tr("No model performance metrics available."))
 
 
 def _render_system_config(st, config: Dict):
     """Render system configuration summary."""
-    st.subheader("System Configuration")
+    st.subheader(_tr("System Configuration"))
 
-    with st.expander("Full Configuration", expanded=False):
+    with st.expander(_tr("Full Configuration"), expanded=False):
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("**Simulation**")
+            st.markdown(f"**{_tr('Simulation')}**")
             sim = config.get("simulation", {})
             st.json({
                 "n_customers": sim.get("n_customers", 20000),
@@ -824,7 +1189,7 @@ def _render_system_config(st, config: Dict):
                 "random_seed": sim.get("random_seed", 42),
             })
 
-            st.markdown("**Budget**")
+            st.markdown(f"**{_tr('Budget')}**")
             budget = config.get("budget", {})
             st.json({
                 "total_krw": budget.get("total_krw", 50000000),
@@ -832,14 +1197,14 @@ def _render_system_config(st, config: Dict):
             })
 
         with col2:
-            st.markdown("**ML Model**")
+            st.markdown(f"**{_tr('ML Model')}**")
             ml = config.get("ml_model", {})
             st.json({
                 "n_splits": ml.get("n_splits", 5),
                 "early_stopping_rounds": ml.get("early_stopping_rounds", 10),
             })
 
-            st.markdown("**DL Model**")
+            st.markdown(f"**{_tr('DL Model')}**")
             dl = config.get("dl_model", {})
             st.json({
                 "architecture": dl.get("architecture", "transformer"),
