@@ -713,12 +713,22 @@ def _render_cost_benefit_analysis(
     # Scatter: cost vs revenue saved, colored by risk
     if all(c in offers.columns for c in ["estimated_cost_krw", "expected_revenue_saved_krw"]):
         color_col = "risk_level" if "risk_level" in offers.columns else None
+        size_col = None
+        n_neg_uplift = 0
+        if "expected_uplift" in offers.columns:
+            # Plotly markers require non-negative sizes; uplift can be negative
+            # (e.g., predicted negative effect for no-action customers). Clip to 0
+            # so those rows render at the minimum marker size instead of crashing.
+            offers = offers.copy()
+            n_neg_uplift = int((offers["expected_uplift"] < 0).sum())
+            offers["size_metric"] = offers["expected_uplift"].clip(lower=0)
+            size_col = "size_metric"
         fig_scatter = px.scatter(
             offers,
             x="estimated_cost_krw",
             y="expected_revenue_saved_krw",
             color=color_col,
-            size="expected_uplift" if "expected_uplift" in offers.columns else None,
+            size=size_col,
             title=_tr("Cost vs Revenue Saved per Customer"),
             labels={
                 "estimated_cost_krw": f"{_tr('Estimated Cost')} ({currency})",
@@ -727,6 +737,12 @@ def _render_cost_benefit_analysis(
             hover_data=["customer_id"] if "customer_id" in offers.columns else None,
         )
         st.plotly_chart(fig_scatter, use_container_width=True)
+        if n_neg_uplift > 0:
+            st.caption(
+                _tr("Note: {n:,} rows with negative expected uplift are shown at minimum marker size.").format(
+                    n=n_neg_uplift
+                )
+            )
 
 
 def _render_recommendation_table(
