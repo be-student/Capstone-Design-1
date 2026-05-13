@@ -728,6 +728,83 @@ def render_segmentation(st_module, config: Dict, data_loader=None):
         )
         st.plotly_chart(fig_risk_seg, use_container_width=True)
 
+    # -----------------------------------------------------------------
+    # Priority Score by Segment (Uplift × CLV)
+    # -----------------------------------------------------------------
+    st.subheader("Retention Priority Score by Segment")
+    seg_summary_path = (
+        data_loader._resolve_existing_path("segment_summary.csv")
+        if data_loader is not None
+        else None
+    )
+    seg_summary = None
+    if seg_summary_path is not None:
+        try:
+            seg_summary = pd.read_csv(seg_summary_path)
+        except Exception:
+            seg_summary = None
+
+    if seg_summary is not None and "avg_priority_score" in seg_summary.columns:
+        seg_summary_sorted = seg_summary.sort_values("avg_priority_score", ascending=True)
+
+        fig_priority = px.bar(
+            seg_summary_sorted,
+            x="avg_priority_score",
+            y="segment",
+            orientation="h",
+            title="Average Priority Score by Segment (Uplift × CLV)",
+            color="avg_priority_score",
+            color_continuous_scale="Viridis",
+            text="avg_priority_score",
+            labels={"avg_priority_score": "Avg Priority Score", "segment": "Segment"},
+        )
+        fig_priority.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig_priority.update_layout(coloraxis_showscale=False)
+        st.plotly_chart(fig_priority, use_container_width=True)
+
+        # Scatter: churn probability vs priority score, bubble = customer count
+        if {"avg_churn_probability", "count"}.issubset(seg_summary.columns):
+            fig_ps_scatter = px.scatter(
+                seg_summary,
+                x="avg_churn_probability",
+                y="avg_priority_score",
+                size="count",
+                color="segment",
+                text="segment",
+                title="Priority Score vs Churn Probability per Segment (bubble = customer count)",
+                labels={
+                    "avg_churn_probability": "Avg Churn Probability",
+                    "avg_priority_score": "Avg Priority Score (Uplift × CLV)",
+                },
+            )
+            fig_ps_scatter.update_traces(textposition="top center")
+            st.plotly_chart(fig_ps_scatter, use_container_width=True)
+    else:
+        # Fallback: compute avg priority_score from predictions if column exists
+        if "priority_score" in predictions.columns:
+            ps_by_seg = (
+                predictions.groupby("segment")["priority_score"]
+                .mean()
+                .reset_index()
+                .sort_values("priority_score", ascending=True)
+            )
+            fig_priority = px.bar(
+                ps_by_seg,
+                x="priority_score",
+                y="segment",
+                orientation="h",
+                title="Average Priority Score by Segment (Uplift × CLV)",
+                color="priority_score",
+                color_continuous_scale="Viridis",
+                text="priority_score",
+                labels={"priority_score": "Avg Priority Score", "segment": "Segment"},
+            )
+            fig_priority.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+            fig_priority.update_layout(coloraxis_showscale=False)
+            st.plotly_chart(fig_priority, use_container_width=True)
+        else:
+            st.info("Priority score data unavailable. Run the pipeline with --mode segment to generate it.")
+
     # Segment details from config
     seg_config = config.get("segmentation", {}).get("segments", [])
     if seg_config:
