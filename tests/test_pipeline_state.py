@@ -46,7 +46,7 @@ class TestSaveCheckpoint:
         state_path = tmp_path / "pipeline_state.json"
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("data_generation", "completed")
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert "data_generation" in data["stages"]
         assert data["stages"]["data_generation"]["status"] == "completed"
 
@@ -55,7 +55,7 @@ class TestSaveCheckpoint:
         state_path = tmp_path / "pipeline_state.json"
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("feature_engineering", "pending")
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         ts = data["stages"]["feature_engineering"]["timestamp"]
         # Should parse as valid ISO timestamp
         datetime.fromisoformat(ts)
@@ -66,7 +66,7 @@ class TestSaveCheckpoint:
         ps = PipelineState(str(state_path))
         meta = {"num_rows": 1000, "auc": 0.85}
         ps.save_checkpoint("ml_training", "completed", metadata=meta)
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["stages"]["ml_training"]["metadata"] == meta
 
     def test_save_checkpoint_preserves_previous_stages(self, tmp_path):
@@ -75,7 +75,7 @@ class TestSaveCheckpoint:
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("data_generation", "completed")
         ps.save_checkpoint("feature_engineering", "completed")
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert "data_generation" in data["stages"]
         assert "feature_engineering" in data["stages"]
 
@@ -85,7 +85,7 @@ class TestSaveCheckpoint:
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("ml_training", "pending")
         ps.save_checkpoint("ml_training", "completed", metadata={"auc": 0.80})
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["stages"]["ml_training"]["status"] == "completed"
         assert data["stages"]["ml_training"]["metadata"]["auc"] == 0.80
 
@@ -112,7 +112,7 @@ class TestLoadState:
     def test_load_state_handles_corrupt_json(self, tmp_path):
         """load_state returns empty on corrupt JSON."""
         state_path = tmp_path / "pipeline_state.json"
-        state_path.write_text("NOT VALID JSON{{{")
+        state_path.write_text("NOT VALID JSON{{{", encoding="utf-8")
         ps = PipelineState(str(state_path))
         state = ps.load_state()
         assert state == {"stages": {}}
@@ -127,7 +127,7 @@ class TestMarkComplete:
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("ml_training", "pending")
         ps.mark_complete("ml_training")
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["stages"]["ml_training"]["status"] == "completed"
 
     def test_mark_complete_with_metadata(self, tmp_path):
@@ -136,7 +136,7 @@ class TestMarkComplete:
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("ml_training", "pending")
         ps.mark_complete("ml_training", metadata={"auc": 0.82})
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["stages"]["ml_training"]["metadata"]["auc"] == 0.82
 
 
@@ -149,7 +149,7 @@ class TestMarkFailed:
         ps = PipelineState(str(state_path))
         ps.save_checkpoint("dl_training", "pending")
         ps.mark_failed("dl_training", error="OOM error")
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["stages"]["dl_training"]["status"] == "failed"
 
     def test_mark_failed_stores_error(self, tmp_path):
@@ -157,7 +157,7 @@ class TestMarkFailed:
         state_path = tmp_path / "pipeline_state.json"
         ps = PipelineState(str(state_path))
         ps.mark_failed("dl_training", error="OOM error")
-        data = json.loads(state_path.read_text())
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["stages"]["dl_training"]["metadata"]["error"] == "OOM error"
 
 

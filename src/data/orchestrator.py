@@ -67,7 +67,7 @@ class SimulatorOrchestrator:
         Returns:
             SimulatorOrchestrator instance.
         """
-        with open(yaml_path, "r") as f:
+        with open(yaml_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
         return cls(config)
 
@@ -454,7 +454,7 @@ class SimulatorOrchestrator:
         state: Dict[str, Any] = {}
         if os.path.exists(state_path):
             try:
-                with open(state_path, "r") as f:
+                with open(state_path, "r", encoding="utf-8") as f:
                     state = json.load(f)
             except (json.JSONDecodeError, IOError):
                 state = {}
@@ -464,5 +464,5 @@ class SimulatorOrchestrator:
         if error_message:
             state["data_generation_error"] = error_message
 
-        with open(state_path, "w") as f:
+        with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)

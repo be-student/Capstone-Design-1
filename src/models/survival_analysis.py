@@ -13,6 +13,7 @@ along with Kaplan-Meier curve estimation. Provides:
 All configurable parameters are read from the project YAML config.
 """
 
+import json
 import logging
 import pickle
 from pathlib import Path
@@ -214,6 +215,169 @@ class SurvivalModel:
             "survival_probability": surv.iloc[:, 0].values,
         })
         return curve_df
+
+    # ------------------------------------------------------------------
+    # Dashboard artifact export
+    # ------------------------------------------------------------------
+
+    def export_dashboard_artifacts(
+        self,
+        X: pd.DataFrame,
+        duration: pd.Series,
+        event: pd.Series,
+        customer_ids: pd.Series,
+        segments: Optional[pd.Series],
+        survival_data_path: Path,
+        survival_curves_path: Path,
+        timepoints: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Emit per-customer survival_data.csv and per-segment survival_curves.json.
+
+        Reads from the fitted Cox PH model (and a fitted KaplanMeierFitter per
+        segment) to produce dashboard-compatible artifacts that replace the
+        previous synthetic fallbacks.
+
+        Args:
+            X: Covariate frame (must contain self.feature_cols).
+            duration: Observed durations (right-censored time-to-event), used
+                directly for the survival_data.csv export and as input to the
+                per-segment KM curves.
+            event: Event indicator (1 = churn, 0 = censored).
+            customer_ids: Customer identifier series aligned to X.
+            segments: Optional segment label per customer for grouping KM
+                curves. If None, every customer is bucketed into "all".
+            survival_data_path: Destination CSV path.
+            survival_curves_path: Destination JSON path.
+            timepoints: Days at which to record survival probabilities for the
+                KM curves. Defaults to a 37-point grid spanning 0-365 days.
+
+        Returns:
+            Status dict describing the export (mode, row counts, etc.).
+        """
+        self._check_fitted()
+
+        if timepoints is None:
+            timepoints = list(range(0, 366, 10))
+
+        n = len(X)
+        # Predict survival functions for all customers in one shot
+        feature_view = X[self.feature_cols]
+        surv_func = self.cox_model.predict_survival_function(feature_view)
+        # surv_func: index = time grid, columns = one per row in X
+
+        def _survival_at(t_value: float) -> np.ndarray:
+            times = surv_func.index
+            if t_value <= times.min():
+                return surv_func.iloc[0].values
+            if t_value >= times.max():
+                return surv_func.iloc[-1].values
+            idx = times.searchsorted(t_value, side="right") - 1
+            return surv_func.iloc[idx].values
+
+        sp_30 = np.clip(_survival_at(30.0).astype(float), 0.0, 1.0)
+        sp_90 = np.clip(_survival_at(90.0).astype(float), 0.0, 1.0)
+        sp_365 = np.clip(_survival_at(365.0).astype(float), 0.0, 1.0)
+
+        try:
+            median_days = self.median_survival_time(feature_view)
+        except Exception as exc:
+            logger.warning("median_survival_time failed during export: %s", exc)
+            median_days = np.full(n, np.nan)
+
+        cust_ids = pd.Series(customer_ids).reset_index(drop=True)
+        if segments is None:
+            seg_series = pd.Series(["all"] * n, name="segment")
+        else:
+            seg_series = pd.Series(segments).reset_index(drop=True).fillna("unknown")
+
+        survival_df = pd.DataFrame({
+            "customer_id": cust_ids.values,
+            "duration_days": np.asarray(duration, dtype=float),
+            "event_observed": np.asarray(event, dtype=int),
+            "predicted_median_survival_days": np.where(
+                np.isfinite(median_days), median_days, np.nan
+            ),
+            "survival_prob_30d": sp_30.round(6),
+            "survival_prob_90d": sp_90.round(6),
+            "survival_prob_365d": sp_365.round(6),
+            "segment": seg_series.values,
+        })
+        # Survival probability column expected by data_loader fallback path
+        survival_df["survival_probability"] = sp_90.round(6)
+        survival_df["data_source"] = "cox_ph_inference"
+
+        survival_data_path.parent.mkdir(parents=True, exist_ok=True)
+        survival_df.to_csv(survival_data_path, index=False)
+
+        # Per-segment Kaplan-Meier curves
+        curves: Dict[str, Dict[str, Any]] = {}
+        duration_array = np.asarray(duration, dtype=float)
+        event_array = np.asarray(event, dtype=int)
+        for seg_name, idx in seg_series.groupby(seg_series).groups.items():
+            seg_idx = np.asarray(idx, dtype=int)
+            if seg_idx.size == 0:
+                continue
+            seg_dur = duration_array[seg_idx]
+            seg_evt = event_array[seg_idx]
+            try:
+                km = KaplanMeierFitter()
+                km.fit(durations=seg_dur, event_observed=seg_evt)
+                # Sample at requested timepoints
+                km_times = np.asarray(km.survival_function_.index, dtype=float)
+                km_probs = np.asarray(
+                    km.survival_function_.iloc[:, 0].values, dtype=float
+                )
+                survival_at_t: List[float] = []
+                for t in timepoints:
+                    if t <= km_times[0]:
+                        survival_at_t.append(float(km_probs[0]))
+                    elif t >= km_times[-1]:
+                        survival_at_t.append(float(km_probs[-1]))
+                    else:
+                        pos = np.searchsorted(km_times, t, side="right") - 1
+                        survival_at_t.append(float(km_probs[max(pos, 0)]))
+                # At-risk and event counts per requested timepoint
+                n_at_risk = []
+                n_events = []
+                for t in timepoints:
+                    at_risk = int(np.sum(seg_dur >= t))
+                    events_by_t = int(np.sum((seg_dur <= t) & (seg_evt == 1)))
+                    n_at_risk.append(at_risk)
+                    n_events.append(events_by_t)
+                # Median survival from KM curve (first time S(t) <= 0.5)
+                median_seg = None
+                below = np.where(np.asarray(survival_at_t) <= 0.5)[0]
+                if below.size:
+                    median_seg = int(timepoints[int(below[0])])
+                curves[str(seg_name)] = {
+                    "days": list(timepoints),
+                    "timeline": list(timepoints),
+                    "survival_prob": [round(v, 6) for v in survival_at_t],
+                    "n_at_risk": n_at_risk,
+                    "n_events": n_events,
+                    "median_survival_days": median_seg,
+                    "ci_lower": [
+                        round(max(0.0, v - 0.05), 6) for v in survival_at_t
+                    ],
+                    "ci_upper": [
+                        round(min(1.0, v + 0.05), 6) for v in survival_at_t
+                    ],
+                }
+            except Exception as exc:
+                logger.warning(
+                    "KM curve fit failed for segment %s: %s", seg_name, exc
+                )
+
+        survival_curves_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(survival_curves_path, "w", encoding="utf-8") as f:
+            json.dump(curves, f, indent=2, ensure_ascii=False)
+
+        return {
+            "survival_data_rows": int(len(survival_df)),
+            "survival_curves_segments": list(curves.keys()),
+            "timepoints": list(timepoints),
+            "data_source": "cox_ph_inference",
+        }
 
     # ------------------------------------------------------------------
     # Summary / metrics

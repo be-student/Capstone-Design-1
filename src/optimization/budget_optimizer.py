@@ -1015,7 +1015,7 @@ class LPBudgetOptimizer:
             state["last_total_allocated"] = self.last_result.total_allocated
             state["channel_summary"] = self.last_result.channel_summary
 
-        with open(f"{path}.json", "w") as f:
+        with open(f"{path}.json", "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
         if self.last_result is not None:
@@ -1039,7 +1039,7 @@ class LPBudgetOptimizer:
         LPBudgetOptimizer
             Restored instance (without last_result data — call solve() again).
         """
-        with open(f"{path}.json", "r") as f:
+        with open(f"{path}.json", "r", encoding="utf-8") as f:
             state = json.load(f)
 
         channels = [
@@ -1269,7 +1269,7 @@ def load_config(config_path: Union[str, Path]) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

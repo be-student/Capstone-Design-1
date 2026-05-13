@@ -33,7 +33,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -651,7 +651,7 @@ class TestCLIEntryPoints:
 
         # Write temp config
         config_path = tmp_path / "config.yaml"
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f)
 
         # Write temp data
@@ -676,7 +676,7 @@ class TestCLIEntryPoints:
         import yaml
 
         config_path = tmp_path / "config.yaml"
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f)
 
         data_path = tmp_path / "data.csv"
@@ -706,7 +706,7 @@ class TestCLIEntryPoints:
 
         config_path = tmp_path / "test.yaml"
         config_data = {"budget": {"total_krw": 1000}}
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f)
 
         loaded = load_config(config_path)

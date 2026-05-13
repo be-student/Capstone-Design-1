@@ -57,7 +57,7 @@ def config() -> dict:
     A/B testing, survival, recommendation, budget, dashboard,
     and CLI tests.
     """
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -475,7 +475,7 @@ def docker_compose_path() -> Path:
 @pytest.fixture
 def docker_compose(docker_compose_path) -> dict:
     """Load and parse docker-compose.yml."""
-    with open(docker_compose_path, "r") as f:
+    with open(docker_compose_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -605,21 +605,21 @@ def dashboard_data_loader(config):
 def dockerfile_mlflow() -> str:
     """Read Dockerfile.mlflow contents."""
     path = PROJECT_ROOT / "Dockerfile.mlflow"
-    return path.read_text() if path.exists() else ""
+    return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 @pytest.fixture
 def dockerfile_pipeline() -> str:
     """Read Dockerfile.pipeline contents."""
     path = PROJECT_ROOT / "Dockerfile.pipeline"
-    return path.read_text() if path.exists() else ""
+    return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 @pytest.fixture
 def dockerfile_dashboard() -> str:
     """Read Dockerfile.dashboard contents."""
     path = PROJECT_ROOT / "Dockerfile.dashboard"
-    return path.read_text() if path.exists() else ""
+    return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 # ---------------------------------------------------------------------------

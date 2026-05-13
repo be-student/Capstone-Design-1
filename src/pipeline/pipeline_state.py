@@ -58,7 +58,7 @@ class PipelineState:
         if not os.path.exists(self.state_path):
             return {"stages": {}}
         try:
-            with open(self.state_path, "r") as f:
+            with open(self.state_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if "stages" not in data:
                 data["stages"] = {}
@@ -80,7 +80,7 @@ class PipelineState:
         parent = os.path.dirname(self.state_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(self.state_path, "w") as f:
+        with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
 
     def save_checkpoint(

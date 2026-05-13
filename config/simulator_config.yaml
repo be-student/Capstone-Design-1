@@ -28,6 +28,18 @@ churn_definition:
   no_purchase_days: 30            # Days without purchase to flag churn
   no_login_days: 60               # Days without login/visit to flag churn
   operator: "OR"                  # OR = either condition triggers churn
+  # Future-window prediction split. Features are computed at the
+  # *observation cutoff* T = end_date - observation_window_days using only
+  # events with event_date <= T. The churn label is determined by activity
+  # in (T, end_date]. This temporal separation makes `recency` a
+  # legitimate predictor of *future* churn rather than a tautology with
+  # the label. Default = max(no_purchase_days, no_login_days) so the
+  # observation cutoff covers BOTH label-defining windows.
+  observation_window_days: 60
+  # Rate-preserving label noise (deprecated safety net — left at 0
+  # because the future-window split is the structural fix; turn on
+  # only if a future change re-introduces label/feature alignment).
+  label_noise_rate: 0.0
 
 # ---------------------------------------------------------------------------
 # Target churn rate range for the simulated population

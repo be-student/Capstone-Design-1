@@ -45,7 +45,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -681,7 +681,7 @@ class TestDashboardArtifactAdapters:
             }],
             "summary": {"total_experiments": 1, "significant_count": 1},
         }
-        with open(artifacts_dir / "ab_test_detailed.json", "w") as f:
+        with open(artifacts_dir / "ab_test_detailed.json", "w", encoding="utf-8") as f:
             json.dump(payload, f)
 
         cfg = dict(config)
@@ -712,7 +712,7 @@ class TestDashboardArtifactAdapters:
                 }
             },
         }
-        with open(results_dir / "monitoring_report.json", "w") as f:
+        with open(results_dir / "monitoring_report.json", "w", encoding="utf-8") as f:
             json.dump(report, f)
 
         cfg = dict(config)

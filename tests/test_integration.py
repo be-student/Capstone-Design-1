@@ -47,7 +47,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -140,7 +140,7 @@ class TestDockerComposeConfiguration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
 
             services = compose.get("services", {})
@@ -154,7 +154,7 @@ class TestDockerComposeConfiguration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
 
             assert "pipeline" in compose.get("services", {}), (
@@ -166,7 +166,7 @@ class TestDockerComposeConfiguration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
 
             assert "dashboard" in compose.get("services", {}), (
@@ -178,7 +178,7 @@ class TestDockerComposeConfiguration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
 
             assert "redis" in compose.get("services", {}), (
@@ -190,7 +190,7 @@ class TestDockerComposeConfiguration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
 
             assert "mlflow" in compose.get("services", {}), (
@@ -202,7 +202,7 @@ class TestDockerComposeConfiguration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = yaml.safe_load(f)
 
             dashboard = compose.get("services", {}).get("dashboard", {})
@@ -216,7 +216,7 @@ class TestDockerComposeConfiguration:
         """Docker Compose must not require GPU resources."""
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 content = f.read()
 
             assert "nvidia" not in content.lower(), (
@@ -242,12 +242,12 @@ class TestPipelineStateCheckpoint:
             "last_completed_step": None,
         }
 
-        with open(pipeline_state_path, "w") as f:
+        with open(pipeline_state_path, "w", encoding="utf-8") as f:
             json.dump(initial_state, f, indent=2)
 
         assert pipeline_state_path.exists()
 
-        with open(pipeline_state_path, "r") as f:
+        with open(pipeline_state_path, "r", encoding="utf-8") as f:
             loaded = json.load(f)
 
         assert loaded["data_generation"] == "pending"
@@ -271,17 +271,17 @@ class TestPipelineStateCheckpoint:
             "last_completed_step": None,
         }
 
-        with open(pipeline_state_path, "w") as f:
+        with open(pipeline_state_path, "w", encoding="utf-8") as f:
             json.dump(state, f)
 
         # Simulate step completion
         state["data_generation"] = "completed"
         state["last_completed_step"] = "data_generation"
 
-        with open(pipeline_state_path, "w") as f:
+        with open(pipeline_state_path, "w", encoding="utf-8") as f:
             json.dump(state, f)
 
-        with open(pipeline_state_path, "r") as f:
+        with open(pipeline_state_path, "r", encoding="utf-8") as f:
             loaded = json.load(f)
 
         assert loaded["data_generation"] == "completed"
@@ -297,10 +297,10 @@ class TestPipelineStateCheckpoint:
 
         state["preprocessing"] = "failed"
 
-        with open(pipeline_state_path, "w") as f:
+        with open(pipeline_state_path, "w", encoding="utf-8") as f:
             json.dump(state, f)
 
-        with open(pipeline_state_path, "r") as f:
+        with open(pipeline_state_path, "r", encoding="utf-8") as f:
             loaded = json.load(f)
 
         assert loaded["preprocessing"] == "failed"
@@ -588,7 +588,7 @@ class TestMLflowBackendIntegration:
         compose_path = PROJECT_ROOT / "docker-compose.yml"
         if compose_path.exists():
             import yaml as _yaml
-            with open(compose_path, "r") as f:
+            with open(compose_path, "r", encoding="utf-8") as f:
                 compose = _yaml.safe_load(f)
 
             services = compose.get("services", {})

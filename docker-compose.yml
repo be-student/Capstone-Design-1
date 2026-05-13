@@ -175,7 +175,9 @@ services:
     command: ["streamlit", "run", "src/dashboard/app.py",
               "--server.port=8501",
               "--server.address=0.0.0.0",
-              "--server.headless=true"]
+              "--server.headless=true",
+              "--server.runOnSave=true",
+              "--server.fileWatcherType=poll"]
     networks:
       - churn-network
 

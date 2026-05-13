@@ -44,9 +44,17 @@ TEXT_ARTIFACT_NAMES = {
 
 
 def _is_local_absolute_path(value: str) -> bool:
-    """Return True for common workstation absolute path forms."""
+    """Return True for common workstation absolute path forms.
+
+    Recognizes POSIX roots (``/Users``, ``/home``, ``/private``) and Windows
+    drive roots (``C:\\Users``, ``D:\\Users``, ...).
+    """
     parts = Path(value).parts
-    return len(parts) > 1 and parts[0] == os.sep and parts[1] in LOCAL_ROOT_NAMES
+    if len(parts) < 2 or parts[1] not in LOCAL_ROOT_NAMES:
+        return False
+    if parts[0] == os.sep:
+        return True
+    return bool(os.path.splitdrive(value)[0])
 
 
 def _collapse_absolute_path(value: str) -> str:
@@ -61,11 +69,23 @@ def _collapse_absolute_path(value: str) -> str:
 
 def _sanitize_text_evidence(text: str) -> str:
     """Remove machine-local absolute paths and usernames from text evidence."""
-    root = PROJECT_ROOT.resolve(strict=False).as_posix()
-    sanitized = text.replace(f"file://{root}/", "")
-    sanitized = sanitized.replace(f"file://{root}", ".")
-    sanitized = sanitized.replace(f"{root}/", "")
-    sanitized = sanitized.replace(root, ".")
+    root_posix = PROJECT_ROOT.resolve(strict=False).as_posix()
+    sanitized = text.replace(f"file://{root_posix}/", "")
+    sanitized = sanitized.replace(f"file://{root_posix}", ".")
+    sanitized = sanitized.replace(f"{root_posix}/", "")
+    sanitized = sanitized.replace(root_posix, ".")
+
+    # Windows variants: native backslash and JSON-escaped double-backslash forms.
+    if os.name == "nt":
+        root_native = str(PROJECT_ROOT.resolve(strict=False))
+        root_json = root_native.replace("\\", "\\\\")
+        for variant in (root_native, root_json):
+            sanitized = sanitized.replace(f"{variant}\\\\", "")
+            sanitized = sanitized.replace(f"{variant}\\", "")
+            sanitized = sanitized.replace(variant, ".")
+        # Convert any leftover backslashes inside the now-relativised paths to /
+        sanitized = re.sub(r"(?<![A-Za-z]:)\\\\(?=[\w.])", "/", sanitized)
+        sanitized = re.sub(r"(?<![A-Za-z]:)\\(?=[\w.])", "/", sanitized)
 
     local_user = os.environ.get("USER") or os.environ.get("LOGNAME")
     if local_user:
@@ -155,13 +175,21 @@ class MLflowTracker:
         # Docker config section for reference
         self.docker_config = mlflow_cfg.get("docker", {})
 
-        # Ensure artifact directory exists (only for local filesystem)
+        # Ensure artifact directory exists (only for local filesystem).
+        # Accept either a bare path or a file:// URI; convert to a real path
+        # before mkdir so callers can pass URIs (required for MLflow's artifact
+        # registry on Windows where bare backslash paths have no URI scheme).
         artifact_dir = self.artifact_location
         if (artifact_dir
                 and not artifact_dir.startswith("s3://")
                 and not artifact_dir.startswith("gs://")
                 and not artifact_dir.startswith("http")):
-            os.makedirs(artifact_dir, exist_ok=True)
+            local_dir = artifact_dir
+            if local_dir.startswith("file://"):
+                from urllib.parse import urlparse
+                from urllib.request import url2pathname
+                local_dir = url2pathname(urlparse(local_dir).path)
+            os.makedirs(local_dir, exist_ok=True)
 
         # Configure MLflow
         mlflow.set_tracking_uri(self.tracking_uri)
@@ -721,7 +749,7 @@ class MLflowTracker:
             for idx in sorted_idx:
                 lines.append(f"{names[idx]},{imp_arr[idx]:.6f}")
 
-            with open(fi_path, "w") as f:
+            with open(fi_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
 
             self.log_artifact(fi_path, artifact_path="evaluation")
@@ -740,7 +768,7 @@ class MLflowTracker:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = os.path.join(tmpdir, "config_snapshot.yaml")
-            with open(config_path, "w") as f:
+            with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(self.config, f, default_flow_style=False)
             self.log_artifact(config_path, artifact_path="config")
 
