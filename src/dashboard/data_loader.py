@@ -405,6 +405,101 @@ class DashboardDataLoader:
         adapted["clv_predicted"] = pd.to_numeric(
             adapted["clv_predicted"], errors="coerce"
         )
+        adapted = self._enrich_predictions_with_sidecar_artifacts(adapted)
+        return adapted
+
+    def _enrich_predictions_with_sidecar_artifacts(
+        self, adapted: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Left-join recommendation/feature columns so dashboard widgets
+        (e.g. the Overview Customer Lookup card) can render real
+        ``recommended_action``, ``offer_type``, ``days_since_last_purchase``,
+        and ``churn_label`` values instead of "N/A" placeholders.
+
+        Each artifact is loaded defensively — a missing or unreadable file
+        only skips that particular join and emits a warning via the module
+        logger, leaving the rest of the prediction frame intact.
+        """
+        if "customer_id" not in adapted.columns:
+            return adapted
+
+        # Retention offers -> recommended_action, offer_type, expected_revenue_saved_krw, priority_score
+        offers_path = self._resolve_existing_path("retention_offers.csv")
+        if offers_path is not None:
+            try:
+                offers = pd.read_csv(offers_path)
+                offer_cols = [
+                    c for c in [
+                        "customer_id",
+                        "recommended_action",
+                        "offer_type",
+                        "expected_revenue_saved_krw",
+                        "priority_score",
+                    ]
+                    if c in offers.columns
+                ]
+                if "customer_id" in offer_cols and len(offer_cols) > 1:
+                    offers = offers[offer_cols].copy()
+                    offers["customer_id"] = offers["customer_id"].astype(str)
+                    # Avoid duplicate customer rows poisoning the left join.
+                    offers = offers.drop_duplicates(subset=["customer_id"], keep="last")
+                    adapted = adapted.merge(offers, on="customer_id", how="left")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "retention_offers enrichment skipped (%s): %s",
+                    offers_path, exc,
+                )
+        else:
+            logger.warning(
+                "retention_offers enrichment skipped: retention_offers.csv not found "
+                "in dashboard search paths."
+            )
+
+        # Features -> days_since_last_purchase, churn_label
+        features_path = self._resolve_existing_path("features.csv")
+        if features_path is not None:
+            try:
+                feat_cols = [
+                    "customer_id",
+                    "days_since_last_purchase",
+                    "churn_label",
+                ]
+                features = pd.read_csv(features_path, usecols=lambda c: c in feat_cols)
+                keep_cols = [c for c in feat_cols if c in features.columns]
+                if "customer_id" in keep_cols and len(keep_cols) > 1:
+                    features = features[keep_cols].copy()
+                    features["customer_id"] = features["customer_id"].astype(str)
+                    features = features.drop_duplicates(subset=["customer_id"], keep="last")
+                    adapted = adapted.merge(features, on="customer_id", how="left")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "features enrichment skipped (%s): %s",
+                    features_path, exc,
+                )
+        else:
+            logger.warning(
+                "features enrichment skipped: features.csv not found in dashboard "
+                "search paths."
+            )
+
+        # Fill sensible defaults for downstream renderers.
+        if "recommended_action" in adapted.columns:
+            adapted["recommended_action"] = (
+                adapted["recommended_action"].fillna("no_action")
+            )
+        if "offer_type" in adapted.columns:
+            adapted["offer_type"] = adapted["offer_type"].fillna("")
+        for numeric_col in [
+            "expected_revenue_saved_krw",
+            "priority_score",
+            "days_since_last_purchase",
+            "churn_label",
+        ]:
+            if numeric_col in adapted.columns:
+                adapted[numeric_col] = pd.to_numeric(
+                    adapted[numeric_col], errors="coerce"
+                ).fillna(0)
+
         return adapted
 
     def get_prediction_coverage(self) -> Dict[str, Any]:
