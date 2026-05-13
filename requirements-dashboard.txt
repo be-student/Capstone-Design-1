@@ -23,3 +23,8 @@ redis>=5.0.0,<6.0
 mlflow-skinny==2.12.1
 cryptography==42.0.8
 sqlalchemy>=2.0.0,<3.0
+# alembic is a transitive dependency of MLflow's SQLAlchemy backend used to
+# bootstrap the sqlite tracking store on first connect. mlflow-skinny omits
+# it, so we declare it explicitly to keep `mlflow.search_experiments()`
+# from raising ModuleNotFoundError on the dashboard image.
+alembic>=1.10.0,<2.0
