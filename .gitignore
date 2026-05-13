@@ -23,6 +23,7 @@ build/
 
 # pytest
 .pytest_cache/
+test_results/
 
 # OMC (oh-my-claudecode)
 .omc/
