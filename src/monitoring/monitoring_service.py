@@ -436,13 +436,37 @@ def append_drift_history(
     # still produce at least one drift_history line for the dashboard.
     psi_mean = float(np.mean(psi_values)) if psi_values else 0.0
     ks_mean = float(np.mean(ks_values)) if ks_values else 0.0
+
+    # Be honest about severity for the synthetic row. The previous behavior
+    # propagated ``overall_alert_level`` from the report verbatim, which
+    # could be "red" on the very first run even when PSI was well below
+    # the yellow threshold (conservative default for initial baselines).
+    # The dashboard reads ``iloc[-1]`` against this row, so a false-positive
+    # red here lights up the "System Issues Detected" banner. Derive the
+    # level from the actual ``psi_mean`` against the configured thresholds.
+    is_initial = not history_path.exists()
+    if psi_mean >= float(psi_red_threshold):
+        overall_row_level = "red"
+    elif psi_mean >= float(psi_yellow_threshold):
+        overall_row_level = "yellow"
+    else:
+        overall_row_level = "green"
+    # Only honor a higher upstream severity when it is justified by the
+    # numeric PSI; never downgrade green to red just because the run is
+    # the first one or a feature was flagged on a different signal.
+    if not is_initial and overall_level in {"yellow", "red"} and (
+        (overall_level == "red" and overall_row_level == "red")
+        or (overall_level == "yellow" and overall_row_level in {"yellow", "red"})
+    ):
+        overall_row_level = overall_level
+
     rows.append({
         "timestamp": timestamp,
         "feature_name": "__overall__",
         "psi": round(psi_mean, 6),
         "ks_stat": round(ks_mean, 6),
         "ks_pvalue": None,
-        "alert_level": overall_level,
+        "alert_level": overall_row_level,
         "threshold_psi_yellow": float(psi_yellow_threshold),
         "threshold_psi_red": float(psi_red_threshold),
         "threshold_ks": float(ks_threshold),
@@ -454,7 +478,6 @@ def append_drift_history(
 
     new_rows = pd.DataFrame(rows, columns=DRIFT_HISTORY_COLUMNS)
 
-    is_initial = not history_path.exists()
     if is_initial:
         new_rows["is_initial_check"] = True
         new_rows.to_csv(history_path, index=False)
