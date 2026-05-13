@@ -2342,6 +2342,31 @@ def render_uplift(st_module, config: Dict, data_loader=None):
     )
     fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
     fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray")
+    # Quadrant label annotations
+    quadrant_labels = [
+        dict(x=0.98, y=0.98, text="Persuadable", xanchor="right", yanchor="top",
+             bgcolor="rgba(46,204,113,0.15)", bordercolor="#2ecc71"),
+        dict(x=0.02, y=0.98, text="Sure Thing", xanchor="left", yanchor="top",
+             bgcolor="rgba(52,152,219,0.15)", bordercolor="#3498db"),
+        dict(x=0.02, y=0.02, text="Lost Cause", xanchor="left", yanchor="bottom",
+             bgcolor="rgba(149,165,166,0.15)", bordercolor="#95a5a6"),
+        dict(x=0.98, y=0.02, text="Sleeping Dog", xanchor="right", yanchor="bottom",
+             bgcolor="rgba(231,76,60,0.15)", bordercolor="#e74c3c"),
+    ]
+    for q in quadrant_labels:
+        fig_scatter.add_annotation(
+            x=q["x"], y=q["y"],
+            xref="paper", yref="paper",
+            text=f"<b>{q['text']}</b>",
+            showarrow=False,
+            font=dict(size=12),
+            bgcolor=q["bgcolor"],
+            bordercolor=q["bordercolor"],
+            borderwidth=1,
+            borderpad=4,
+            xanchor=q["xanchor"],
+            yanchor=q["yanchor"],
+        )
     st.plotly_chart(fig_scatter, use_container_width=True)
 
     # -----------------------------------------------------------------
