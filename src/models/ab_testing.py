@@ -619,7 +619,7 @@ class ABTestFramework:
             "csv_path": str(csv_path),
             "json_path": str(json_path),
         }
-        with open(json_path, "w") as f:
+        with open(json_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
         return payload
@@ -1042,7 +1042,7 @@ class ABTestFramework:
             "experiments": self.experiments,
         }
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(save_path, "w") as f:
+        with open(save_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
         logger.info("Saved ABTestFramework state to %s", save_path)
 
@@ -1064,7 +1064,7 @@ class ABTestFramework:
         if not load_path.suffix:
             load_path = load_path.with_suffix(".json")
 
-        with open(load_path, "r") as f:
+        with open(load_path, "r", encoding="utf-8") as f:
             state = json.load(f)
 
         # Reconstruct a minimal config from saved state

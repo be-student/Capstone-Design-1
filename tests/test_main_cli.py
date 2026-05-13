@@ -97,7 +97,7 @@ def sample_config():
 def config_file(sample_config, tmp_path):
     """Write sample config to a temp YAML file and return its path."""
     cfg_path = tmp_path / "test_config.yaml"
-    with open(cfg_path, "w") as f:
+    with open(cfg_path, "w", encoding="utf-8") as f:
         yaml.dump(sample_config, f)
     return str(cfg_path)
 
@@ -167,7 +167,7 @@ class TestLoadConfig:
 
     def test_load_empty_yaml_returns_empty_dict(self, tmp_path):
         p = tmp_path / "empty.yaml"
-        p.write_text("")
+        p.write_text("", encoding="utf-8")
         assert load_config(str(p)) == {}
 
 
@@ -345,7 +345,7 @@ class TestSaveJson:
         p = tmp_path / "rt.json"
         data = {"x": 1, "y": np.float64(2.5), "z": np.array([10, 20])}
         _save_json(data, p)
-        loaded = json.loads(p.read_text())
+        loaded = json.loads(p.read_text(encoding="utf-8"))
         assert loaded["x"] == 1
         assert loaded["y"] == 2.5
         assert loaded["z"] == [10, 20]

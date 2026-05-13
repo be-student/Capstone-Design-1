@@ -30,7 +30,7 @@ def segmentation_config():
     config_path = os.path.join(
         os.path.dirname(__file__), "..", "config", "simulator_config.yaml"
     )
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config.get("segmentation", {})
 
@@ -475,7 +475,7 @@ class TestValueUpliftSegmentation:
 
         main.run_segment(config, args)
 
-        payload = json.loads((results_dir / "segment_validation.json").read_text())
+        payload = json.loads((results_dir / "segment_validation.json").read_text(encoding="utf-8"))
         assert payload["high_value_persuadable_count"] == 0
         assert payload["high_value_lost_cause_count"] == 0
         assert payload["absence_reason"]

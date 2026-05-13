@@ -36,7 +36,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 @pytest.fixture
 def config():
     """Load simulator configuration from YAML."""
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -660,7 +660,7 @@ class TestDataLoaderIntegration:
             '"psi_report": {"feature_alerts": {}}, '
             '"ks_report": {"feature_alerts": {}}, '
             '"performance": {"latest": []}}'
-        )
+        , encoding="utf-8")
         pd.DataFrame({
             "timestamp": [
                 "2026-05-01T00:00:00Z",

@@ -35,7 +35,7 @@ def config():
     """Load simulator configuration from YAML."""
     import yaml
 
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

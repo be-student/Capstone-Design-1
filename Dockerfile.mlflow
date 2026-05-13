@@ -28,9 +28,10 @@ RUN mkdir -p /mlflow/artifacts /mlflow/db
 # Set working directory
 WORKDIR /mlflow
 
-# Copy entrypoint script
-COPY scripts/mlflow_entrypoint.sh /mlflow/entrypoint.sh
-RUN chmod +x /mlflow/entrypoint.sh
+# Copy entrypoint script. Place it OUTSIDE /mlflow because the compose
+# named volume `mlflow-data:/mlflow` would otherwise shadow this file.
+COPY scripts/mlflow_entrypoint.sh /usr/local/bin/mlflow_entrypoint.sh
+RUN chmod +x /usr/local/bin/mlflow_entrypoint.sh
 
 # Expose MLflow UI port
 EXPOSE 5000
@@ -40,4 +41,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=15s \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # Run MLflow server
-ENTRYPOINT ["/mlflow/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/mlflow_entrypoint.sh"]

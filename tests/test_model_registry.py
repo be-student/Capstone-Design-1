@@ -37,21 +37,34 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 def config():
     """Load simulator configuration from YAML."""
     import yaml
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 @pytest.fixture
 def tmp_mlflow_dir(tmp_path):
-    """Create temporary MLflow directories."""
+    """Create temporary MLflow directories.
+
+    `artifacts_dir` is returned as a `file://` URI so MLflow's artifact
+    registry can resolve it on Windows (a bare `C:\\...` path has no scheme).
+    """
     db_path = tmp_path / "mlflow.db"
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.mkdir(exist_ok=True)
     return {
         "db_path": str(db_path),
-        "artifacts_dir": str(artifacts_dir),
-        "tracking_uri": f"sqlite:///{db_path}",
+        "artifacts_dir": artifacts_dir.as_uri(),
+        "tracking_uri": f"sqlite:///{db_path.as_posix()}",
     }
+
+
+@pytest.fixture(autouse=True)
+def _drain_active_mlflow_run():
+    """Ensure no test in this module leaks an active MLflow run."""
+    import mlflow
+    yield
+    while mlflow.active_run() is not None:
+        mlflow.end_run()
 
 
 @pytest.fixture

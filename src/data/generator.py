@@ -85,6 +85,7 @@ class CustomerDataGenerator:
         self.no_purchase_days = churn_cfg["no_purchase_days"]
         self.no_login_days = churn_cfg["no_login_days"]
         self.churn_operator = churn_cfg.get("operator", "OR")
+        self.label_noise_rate = float(churn_cfg.get("label_noise_rate", 0.0))
 
         treatment_cfg = config["treatment"]
         self.treatment_ratio = treatment_cfg["treatment_ratio"]
@@ -870,5 +871,27 @@ class CustomerDataGenerator:
         else:  # AND
             is_churned = no_purchase_churn & no_login_churn
 
-        customers_df["churn_label"] = is_churned.astype(int)
+        labels = is_churned.astype(int).to_numpy(copy=True)
+
+        # Rate-preserving symmetric label noise.
+        # Without this the churn label is a deterministic threshold on
+        # `recency` (= days_since_purchase). Since `recency` is also a
+        # model feature (see features/feature_engineering.py::compute_rfm),
+        # any tree-based model can recover the label exactly, producing
+        # AUC = 1.0 — a tautology, not learning. Symmetric flipping keeps
+        # the population churn rate within target_churn_rate bounds while
+        # capping the achievable AUC at a realistic ~0.85-0.90.
+        if self.label_noise_rate > 0 and len(labels) > 0:
+            n_flip_each = int(round(len(labels) * self.label_noise_rate / 2.0))
+            if n_flip_each > 0:
+                ones_idx = np.where(labels == 1)[0]
+                zeros_idx = np.where(labels == 0)[0]
+                k_each = min(n_flip_each, len(ones_idx), len(zeros_idx))
+                if k_each > 0:
+                    flip_to_zero = self.rng.choice(ones_idx, size=k_each, replace=False)
+                    flip_to_one = self.rng.choice(zeros_idx, size=k_each, replace=False)
+                    labels[flip_to_zero] = 0
+                    labels[flip_to_one] = 1
+
+        customers_df["churn_label"] = labels
         return customers_df

@@ -281,6 +281,176 @@ class RecommendationEngine:
             "customer_id", "action_type", "score", "estimated_cost", "reason"
         ]]
 
+    # ── Dashboard artifact export ─────────────────────────────────────────
+
+    # Offer-detail catalogue: human-readable description per offer key, used
+    # when rendering the retention_offers.csv detail column. Keys must match
+    # the offer types produced by `_offer_type_for` below.
+    _OFFER_DETAILS: Dict[str, str] = {
+        "premium_discount": "30% off next 3 orders + free shipping",
+        "discount_coupon": "20% off next order",
+        "engagement_email": "Personalized product picks + 10% coupon",
+        "loyalty_points": "2x loyalty points for 30 days",
+        "personal_outreach": "Account manager personal call within 48h",
+        "push_notification": "In-app push with personalized product picks",
+        "email_campaign": "Targeted re-engagement email campaign",
+        "exclusive_offer": "Limited-time exclusive offer for high-value tier",
+        "no_action": "No intervention recommended (low ROI segment).",
+    }
+
+    @staticmethod
+    def _risk_level_for(churn_probability: float) -> str:
+        """Bin a churn probability into a dashboard risk level string."""
+        if churn_probability >= 0.75:
+            return "critical"
+        if churn_probability >= 0.50:
+            return "high"
+        if churn_probability >= 0.25:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _offer_type_for(action_type: str, risk_level: str, segment: str) -> str:
+        """Map an action_type + risk to a retention-offer category."""
+        if action_type == "coupon" and risk_level in {"critical", "high"}:
+            if segment in {"vip_loyal", "new_customer"}:
+                return "premium_discount"
+            return "discount_coupon"
+        if action_type == "coupon":
+            return "discount_coupon"
+        if action_type == "loyalty_points":
+            return "loyalty_points"
+        if action_type == "personal_outreach":
+            return "personal_outreach"
+        if action_type == "email_campaign":
+            return "engagement_email"
+        if action_type == "push_notification":
+            return "push_notification"
+        if action_type == "exclusive_offer":
+            return "exclusive_offer"
+        if action_type == "no_action":
+            return "no_action"
+        return action_type or "no_action"
+
+    def to_retention_offers(
+        self,
+        recommendations: pd.DataFrame,
+        data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Project a recommendations frame onto the retention_offers schema.
+
+        The dashboard's ``load_retention_offers`` reader expects a per-customer
+        offer ledger with cost, expected uplift, and revenue saved columns —
+        this method takes the in-memory output from :meth:`recommend` (which
+        already includes decision-context columns from
+        :meth:`_attach_decision_context`) and writes the dashboard-shaped
+        DataFrame, deriving offer_type / offer_detail / risk_level from the
+        underlying customer attributes (no random number generation).
+
+        Args:
+            recommendations: Output frame from ``recommend(include_context=True)``.
+            data: The original input frame passed to ``recommend``; used to
+                back-fill churn_probability and segment when the recommendation
+                frame lacks them (rare).
+
+        Returns:
+            DataFrame with columns ``customer_id, segment, risk_level,
+            churn_probability, recommended_action, offer_type, offer_detail,
+            expected_uplift, estimated_cost_krw, expected_revenue_saved_krw,
+            priority_score`` (one row per customer).
+        """
+        if recommendations is None or recommendations.empty:
+            return pd.DataFrame(
+                columns=[
+                    "customer_id", "segment", "risk_level", "churn_probability",
+                    "recommended_action", "offer_type", "offer_detail",
+                    "expected_uplift", "estimated_cost_krw",
+                    "expected_revenue_saved_krw", "priority_score",
+                ]
+            )
+
+        df = recommendations.copy()
+        df["customer_id"] = df["customer_id"].astype(str)
+        if "segment" not in df.columns and "segment" in data.columns:
+            ctx = data[["customer_id", "segment"]].copy()
+            ctx["customer_id"] = ctx["customer_id"].astype(str)
+            df = df.merge(ctx, on="customer_id", how="left")
+        if "churn_probability" not in df.columns:
+            if "churn_probability" in data.columns:
+                ctx = data[["customer_id", "churn_probability"]].copy()
+                ctx["customer_id"] = ctx["customer_id"].astype(str)
+                df = df.merge(ctx, on="customer_id", how="left")
+            else:
+                df["churn_probability"] = df.get("churn_prob", 0.0)
+
+        df["segment"] = df.get("segment", pd.Series("unknown", index=df.index)).fillna("unknown")
+        df["churn_probability"] = pd.to_numeric(
+            df["churn_probability"], errors="coerce"
+        ).fillna(0.0).clip(0.0, 1.0)
+        df["expected_uplift"] = pd.to_numeric(
+            df.get("expected_uplift", df.get("uplift_score", 0.0)),
+            errors="coerce",
+        ).fillna(0.0)
+
+        if "estimated_cost" in df.columns:
+            df["estimated_cost_krw"] = pd.to_numeric(
+                df["estimated_cost"], errors="coerce"
+            ).fillna(0.0)
+        else:
+            df["estimated_cost_krw"] = 0.0
+
+        if "expected_revenue_saved" in df.columns:
+            df["expected_revenue_saved_krw"] = pd.to_numeric(
+                df["expected_revenue_saved"], errors="coerce"
+            ).fillna(0.0)
+        else:
+            df["expected_revenue_saved_krw"] = (
+                df["expected_uplift"].clip(lower=0.0) * df.get("clv", 0.0)
+            )
+
+        if "priority_score" not in df.columns:
+            df["priority_score"] = (
+                df["expected_uplift"].clip(lower=0.0)
+                * df.get("clv", 0.0).astype(float)
+            )
+        df["priority_score"] = pd.to_numeric(
+            df["priority_score"], errors="coerce"
+        ).fillna(0.0)
+
+        action_col = df.get("action_type", df.get("recommendation_type", "no_action"))
+        df["recommended_action"] = action_col.astype(str)
+        df["risk_level"] = df["churn_probability"].apply(self._risk_level_for)
+        df["offer_type"] = [
+            self._offer_type_for(str(a), str(r), str(s))
+            for a, r, s in zip(
+                df["recommended_action"],
+                df["risk_level"],
+                df["segment"],
+            )
+        ]
+        df["offer_detail"] = df["offer_type"].map(self._OFFER_DETAILS).fillna(
+            "Personalized retention action."
+        )
+
+        # Force no-action rows to zero out monetary fields (no spend on
+        # sleeping dogs / sure things).
+        no_action_mask = df["recommended_action"].eq("no_action")
+        df.loc[no_action_mask, "estimated_cost_krw"] = 0.0
+        df.loc[no_action_mask, "expected_revenue_saved_krw"] = 0.0
+        df.loc[no_action_mask, "offer_detail"] = self._OFFER_DETAILS["no_action"]
+
+        # Sort highest-priority offers first so the dashboard's head() preview
+        # surfaces the most impactful interventions.
+        df = df.sort_values("priority_score", ascending=False).reset_index(drop=True)
+
+        out_cols = [
+            "customer_id", "segment", "risk_level", "churn_probability",
+            "recommended_action", "offer_type", "offer_detail",
+            "expected_uplift", "estimated_cost_krw",
+            "expected_revenue_saved_krw", "priority_score",
+        ]
+        return df[out_cols]
+
     # ── Persistence ───────────────────────────────────────────────────────
 
     def save(self, path: str) -> None:
@@ -305,7 +475,7 @@ class RecommendationEngine:
         }
 
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, default=str)
 
         logger.info("RecommendationEngine saved to %s", path)
@@ -327,7 +497,7 @@ class RecommendationEngine:
         if not path.endswith(".json"):
             path = path + ".json"
 
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             state = json.load(f)
 
         engine = cls(state["config"])
@@ -412,14 +582,35 @@ class RecommendationEngine:
         return pd.DataFrame(records)
 
     def _no_action_mask(self, data: pd.DataFrame) -> pd.Series:
-        """Identify customers where retention intervention should be skipped."""
+        """Identify customers where retention intervention should be skipped.
+
+        Suppresses retention spend on three groups:
+          1. Negative-uplift customers (sleeping dogs by uplift sign).
+          2. Anyone tagged ``sleeping_dog`` *or* ``sure_thing`` in either
+             the value-uplift segment or the raw uplift segment columns.
+             ``sure_thing`` customers (low churn risk + low uplift) would
+             be retained anyway; issuing a coupon is pure margin
+             cannibalization.
+          3. Customers whose churn probability is below a low-risk
+             threshold (default 0.20). This catches sure_things that the
+             segmentation step did not label, e.g. customers with
+             ``churn_probability < 0.05`` but a slightly positive uplift.
+        """
         uplift = data.get("uplift_score", pd.Series(0.0, index=data.index)).astype(float)
         mask = uplift <= 0
         for col in ("segment", "uplift_segment"):
             if col in data.columns:
                 mask = mask | data[col].astype(str).str.contains(
-                    "sleeping_dog", case=False, na=False
+                    r"sleeping_dog|sure_thing", case=False, na=False, regex=True
                 )
+        if "churn_probability" in data.columns:
+            risk = data["churn_probability"].astype(float)
+            low_risk_threshold = float(
+                self.config.get("recommendations", {}).get(
+                    "low_risk_skip_threshold", 0.20
+                )
+            )
+            mask = mask | (risk < low_risk_threshold)
         return mask
 
     def _apply_no_action_policy(

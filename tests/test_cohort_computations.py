@@ -590,7 +590,7 @@ class TestCohortDashboardIntegration:
         """Cohort data from DashboardDataLoader should work with CohortAnalyzer."""
         import yaml
         config_path = Path(__file__).parent.parent / "config" / "simulator_config.yaml"
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
         from src.dashboard.data_loader import DashboardDataLoader
@@ -609,7 +609,7 @@ class TestCohortDashboardIntegration:
         """Full analysis pipeline should work on dashboard loader data."""
         import yaml
         config_path = Path(__file__).parent.parent / "config" / "simulator_config.yaml"
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
         from src.dashboard.data_loader import DashboardDataLoader

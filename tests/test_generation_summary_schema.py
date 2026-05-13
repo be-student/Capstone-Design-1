@@ -13,7 +13,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "simulator_config.yaml"
 
 @pytest.fixture
 def small_config():
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     config["simulation"]["num_customers"] = 200
     config["simulation"]["simulation_days"] = 90
