@@ -21,7 +21,7 @@
       "primary_path": "models/dl_churn_model.pt",
       "versioned_path": "models/dl_churn_model_v1.pt",
       "metadata": {
-        "architecture": "lstm",
+        "architecture": "transformer",
         "sequence_window": 6,
         "input_size": 40
       }

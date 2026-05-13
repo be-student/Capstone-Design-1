@@ -20,7 +20,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import mlflow
 import numpy as np
@@ -310,6 +311,167 @@ def _string_value(value: Any) -> Optional[str]:
     if value is None or pd.isna(value):
         return None
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Drift history (append-only) export helpers
+# ---------------------------------------------------------------------------
+
+DRIFT_HISTORY_COLUMNS = [
+    "timestamp",
+    "feature_name",
+    "psi",
+    "ks_stat",
+    "ks_pvalue",
+    "alert_level",
+    "threshold_psi_yellow",
+    "threshold_psi_red",
+    "threshold_ks",
+    "num_drifted_features",
+    "psi_mean",
+    "ks_mean",
+    "is_initial_check",
+]
+
+
+def append_drift_history(
+    history_path: Union[str, Path],
+    monitoring_report: Dict[str, Any],
+    psi_yellow_threshold: float = 0.10,
+    psi_red_threshold: float = 0.25,
+    ks_threshold: float = 0.01,
+) -> pd.DataFrame:
+    """Append per-feature drift rows to ``drift_history.csv``.
+
+    Each call writes one row per drift-checked feature (plus a synthetic
+    ``__overall__`` summary row). The file is created on first invocation;
+    subsequent invocations append while keeping the schema stable. The
+    ``is_initial_check`` flag is True only for the very first run so the
+    dashboard can use ``drift_trend_guard`` to suppress trend views until
+    at least two checks exist.
+
+    Args:
+        history_path: Destination CSV path.
+        monitoring_report: The dict written to ``monitoring_report.json``
+            (must contain ``timestamp``, ``overall_alert_level``, ``psi``
+            and ``ks`` sections).
+        psi_yellow_threshold: PSI alert threshold (yellow).
+        psi_red_threshold: PSI alert threshold (red).
+        ks_threshold: KS test p-value alert threshold (drift).
+
+    Returns:
+        The newly appended rows as a DataFrame.
+    """
+    history_path = Path(history_path)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    timestamp = monitoring_report.get(
+        "timestamp", datetime.now(timezone.utc).isoformat()
+    )
+    overall_level = str(
+        monitoring_report.get("overall_alert_level", "green")
+    ).lower()
+    drifted_features = set(
+        str(f) for f in monitoring_report.get("drifted_features", []) or []
+    )
+
+    # Index PSI / KS alerts by feature for easy joining
+    psi_section = monitoring_report.get("psi", {}) or {}
+    ks_section = monitoring_report.get("ks", {}) or {}
+
+    psi_alerts: Dict[str, Dict[str, Any]] = {}
+    for row in psi_section.get("alerts", []) or []:
+        feat = str(row.get("feature", ""))
+        if feat:
+            psi_alerts[feat] = row
+
+    ks_alerts: Dict[str, Dict[str, Any]] = {}
+    for row in ks_section.get("alerts", []) or []:
+        feat = str(row.get("feature", ""))
+        if feat:
+            ks_alerts[feat] = row
+
+    features = sorted(set(psi_alerts) | set(ks_alerts))
+    rows: List[Dict[str, Any]] = []
+    psi_values: List[float] = []
+    ks_values: List[float] = []
+
+    for feat in features:
+        psi_row = psi_alerts.get(feat, {})
+        ks_row = ks_alerts.get(feat, {})
+        psi_val = _safe_float(psi_row.get("psi_value", psi_row.get("psi"))) or 0.0
+        ks_stat = (
+            _safe_float(ks_row.get("statistic", ks_row.get("ks_stat"))) or 0.0
+        )
+        ks_pvalue = _safe_float(ks_row.get("p_value", ks_row.get("ks_pvalue")))
+        level = "green"
+        if feat in drifted_features:
+            if psi_val >= psi_red_threshold:
+                level = "red"
+            elif psi_val >= psi_yellow_threshold:
+                level = "yellow"
+            else:
+                level = "yellow"
+        elif str(psi_row.get("level", "")).lower() in {"red", "yellow"}:
+            level = str(psi_row.get("level")).lower()
+        psi_values.append(psi_val)
+        ks_values.append(ks_stat)
+        rows.append({
+            "timestamp": timestamp,
+            "feature_name": feat,
+            "psi": round(psi_val, 6),
+            "ks_stat": round(ks_stat, 6),
+            "ks_pvalue": round(ks_pvalue, 6) if ks_pvalue is not None else None,
+            "alert_level": level,
+            "threshold_psi_yellow": float(psi_yellow_threshold),
+            "threshold_psi_red": float(psi_red_threshold),
+            "threshold_ks": float(ks_threshold),
+            "num_drifted_features": int(len(drifted_features)),
+            "psi_mean": None,
+            "ks_mean": None,
+            "is_initial_check": False,
+        })
+
+    # Always emit a synthetic overall summary row so single-feature runs
+    # still produce at least one drift_history line for the dashboard.
+    psi_mean = float(np.mean(psi_values)) if psi_values else 0.0
+    ks_mean = float(np.mean(ks_values)) if ks_values else 0.0
+    rows.append({
+        "timestamp": timestamp,
+        "feature_name": "__overall__",
+        "psi": round(psi_mean, 6),
+        "ks_stat": round(ks_mean, 6),
+        "ks_pvalue": None,
+        "alert_level": overall_level,
+        "threshold_psi_yellow": float(psi_yellow_threshold),
+        "threshold_psi_red": float(psi_red_threshold),
+        "threshold_ks": float(ks_threshold),
+        "num_drifted_features": int(len(drifted_features)),
+        "psi_mean": round(psi_mean, 6),
+        "ks_mean": round(ks_mean, 6),
+        "is_initial_check": False,
+    })
+
+    new_rows = pd.DataFrame(rows, columns=DRIFT_HISTORY_COLUMNS)
+
+    is_initial = not history_path.exists()
+    if is_initial:
+        new_rows["is_initial_check"] = True
+        new_rows.to_csv(history_path, index=False)
+    else:
+        try:
+            existing = pd.read_csv(history_path)
+            combined = pd.concat([existing, new_rows], ignore_index=True)
+            combined.to_csv(history_path, index=False)
+        except Exception as exc:
+            logger.warning(
+                "drift_history.csv could not be read for append (%s); "
+                "rewriting from scratch.",
+                exc,
+            )
+            new_rows.to_csv(history_path, index=False)
+
+    return new_rows
 
 
 class AlertLevel(Enum):

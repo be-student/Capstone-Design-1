@@ -834,6 +834,216 @@ def _churn_prediction_frame(
     return out
 
 
+def _confusion_matrix_payload(
+    y_true: np.ndarray,
+    proba: np.ndarray,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """Compute confusion-matrix counts from real test-set predictions."""
+    y_arr = np.asarray(y_true).astype(int)
+    p_arr = np.asarray(proba, dtype=float)
+    pred = (p_arr >= threshold).astype(int)
+    tp = int(((pred == 1) & (y_arr == 1)).sum())
+    fp = int(((pred == 1) & (y_arr == 0)).sum())
+    tn = int(((pred == 0) & (y_arr == 0)).sum())
+    fn = int(((pred == 0) & (y_arr == 1)).sum())
+    return {
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+        "tp": tp,
+        "n_samples": int(len(y_arr)),
+        "threshold": float(threshold),
+        "matrix": [[tn, fp], [fn, tp]],
+    }
+
+
+def _roc_curve_payload(
+    y_true: np.ndarray,
+    proba: np.ndarray,
+    n_points: int = 100,
+) -> Dict[str, Any]:
+    """Compute a downsampled real-data ROC curve from sklearn outputs."""
+    from sklearn.metrics import roc_auc_score, roc_curve
+
+    y_arr = np.asarray(y_true).astype(int)
+    p_arr = np.asarray(proba, dtype=float)
+    fpr_full, tpr_full, _ = roc_curve(y_arr, p_arr)
+    if len(fpr_full) <= n_points:
+        fpr_out = fpr_full
+        tpr_out = tpr_full
+    else:
+        # Sample n_points evenly spaced indices to keep payload small.
+        idx = np.linspace(0, len(fpr_full) - 1, n_points).astype(int)
+        idx = np.unique(idx)
+        fpr_out = fpr_full[idx]
+        tpr_out = tpr_full[idx]
+    auc_val = float(roc_auc_score(y_arr, p_arr))
+    return {
+        "fpr": [round(float(v), 6) for v in fpr_out],
+        "tpr": [round(float(v), 6) for v in tpr_out],
+        "auc": round(auc_val, 6),
+    }
+
+
+def _save_evaluation_artifacts(
+    results_dir: Path,
+    config: Dict[str, Any],
+    y_test: np.ndarray,
+    model_probs: Dict[str, np.ndarray],
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """Write confusion_matrices.json and roc_data.json from real test data.
+
+    Args:
+        results_dir: Pipeline results directory.
+        config: Configuration dict (used to mirror artifacts to dashboard).
+        y_test: Ground-truth labels from the holdout test split.
+        model_probs: Mapping from model name to positive-class probability
+            arrays aligned with ``y_test``. Only models with array length
+            equal to ``len(y_test)`` produce real entries — mismatched
+            arrays are skipped (rather than padded) so the dashboard never
+            sees a fabricated matrix.
+        threshold: Classification threshold (default 0.5).
+
+    Returns:
+        Dict summarising which artifacts were written and their row counts.
+    """
+    cm_payload: Dict[str, Any] = {}
+    roc_payload: Dict[str, Any] = {}
+    skipped: List[str] = []
+    y_arr = np.asarray(y_test).astype(int)
+    for name, probs in model_probs.items():
+        if probs is None:
+            skipped.append(f"{name}:no_probs")
+            continue
+        p_arr = np.asarray(probs, dtype=float)
+        if p_arr.shape[0] != y_arr.shape[0]:
+            skipped.append(f"{name}:shape_mismatch_{p_arr.shape[0]}_vs_{y_arr.shape[0]}")
+            continue
+        try:
+            cm_payload[name] = _confusion_matrix_payload(y_arr, p_arr, threshold)
+            roc_payload[name] = _roc_curve_payload(y_arr, p_arr)
+        except Exception as exc:
+            logger.warning("Evaluation artifact failed for %s: %s", name, exc)
+            skipped.append(f"{name}:{exc}")
+
+    if cm_payload:
+        _save_result_and_artifact(
+            cm_payload,
+            results_dir / "confusion_matrices.json",
+            config,
+        )
+    if roc_payload:
+        _save_result_and_artifact(
+            roc_payload,
+            results_dir / "roc_data.json",
+            config,
+        )
+
+    return {
+        "confusion_matrices": list(cm_payload.keys()),
+        "roc_data": list(roc_payload.keys()),
+        "skipped": skipped,
+        "n_test_samples": int(y_arr.shape[0]),
+    }
+
+
+def _save_scoring_history_artifact(
+    results_dir: Path,
+    config: Dict[str, Any],
+    predictions: pd.DataFrame,
+    n_rows: int = 200,
+) -> Dict[str, Any]:
+    """Write a deterministic scoring_history.csv slice from real predictions.
+
+    Samples ``n_rows`` (default 200) representative customers from the most
+    recent churn_predictions output and gives them synthetic-but-deterministic
+    timestamps spanning the last 24 hours so the dashboard's "Total Scores"
+    KPI reflects real model outputs rather than np.random fixtures.
+
+    Args:
+        results_dir: Pipeline results directory.
+        config: Pipeline config (for artifact mirroring + seed).
+        predictions: Either a churn_predictions DataFrame or any frame with
+            customer_id + churn_probability columns.
+        n_rows: Maximum rows to emit.
+
+    Returns:
+        Dict describing the slice.
+    """
+    from datetime import datetime, timedelta
+
+    if predictions is None or predictions.empty:
+        return {"status": "skipped", "reason": "predictions_empty"}
+
+    seed = config.get("simulation", {}).get("random_seed", 42)
+    rng = np.random.default_rng(seed)
+
+    df = predictions.copy()
+    if "churn_probability" not in df.columns:
+        return {"status": "skipped", "reason": "missing_churn_probability"}
+
+    sample_size = min(n_rows, len(df))
+    sample_idx = rng.choice(len(df), size=sample_size, replace=False)
+    sampled = df.iloc[sample_idx].reset_index(drop=True)
+
+    # Deterministic timestamps over the trailing 24h window
+    now = datetime.now()
+    deltas = np.linspace(0, 24 * 60, sample_size, dtype=float)
+    timestamps = [
+        (now - timedelta(minutes=float(deltas[-1] - dt))).isoformat(
+            timespec="seconds"
+        )
+        for dt in deltas
+    ]
+
+    risk = sampled.get("risk_level")
+    if risk is None:
+        risk = pd.cut(
+            sampled["churn_probability"].astype(float),
+            bins=[-0.01, 0.25, 0.5, 0.75, 1.01],
+            labels=["low", "medium", "high", "critical"],
+        ).astype(str)
+
+    model_version = config.get(
+        "models", {}
+    ).get("default_version", "ensemble_v1")
+    segment = sampled.get("segment", pd.Series("unknown", index=sampled.index))
+    predicted_clv = sampled.get("predicted_clv")
+    if predicted_clv is None:
+        predicted_clv = sampled.get("clv_predicted")
+    if predicted_clv is None:
+        predicted_clv = pd.Series(0.0, index=sampled.index)
+
+    history = pd.DataFrame({
+        "timestamp": timestamps,
+        "scored_at": timestamps,
+        "customer_id": sampled["customer_id"].astype(str).values,
+        "churn_probability": sampled["churn_probability"].astype(float).round(6).values,
+        "risk_level": np.asarray(risk).astype(str),
+        "model_version": str(model_version),
+        "model_type": str(model_version),
+        "segment": np.asarray(segment).astype(str),
+        "predicted_clv": pd.to_numeric(predicted_clv, errors="coerce").fillna(0.0).round(2).values,
+        "recommended_action": sampled.get(
+            "recommended_action", pd.Series("standard_loyalty_program", index=sampled.index)
+        ).astype(str).values,
+        "data_source": "batch_holdout",
+    })
+
+    _save_result_and_artifact(
+        history,
+        results_dir / "scoring_history.csv",
+        config,
+    )
+    return {
+        "status": "completed",
+        "rows": int(len(history)),
+        "data_source": "batch_holdout",
+    }
+
+
 def _budget_metrics(allocation: pd.DataFrame, data: pd.DataFrame) -> pd.DataFrame:
     """Attach expected retained value and ROI columns to an allocation."""
     allocation = allocation.copy()
@@ -1551,6 +1761,52 @@ def run_train(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any
         logger.info("SHAP saved to %s", shap_path)
     except Exception as exc:
         logger.warning("SHAP failed: %s", exc)
+
+    # ── Dashboard evaluation artifacts (confusion matrices + ROC) ─────────
+    # These are derived from the SAME held-out test predictions used to
+    # compute the headline AUC/precision/recall metrics, so the dashboard
+    # never falls back to the synthetic 350/50/80/120 fixture matrices.
+    try:
+        eval_probs: Dict[str, np.ndarray] = {
+            "ml_model": np.asarray(ml_probs, dtype=float),
+        }
+        eval_y = np.asarray(y_test).astype(int)
+        # DL probabilities may have been computed on a sequence-aligned test
+        # set with a slightly different cardinality; only feed it through when
+        # it matches `y_test` exactly so the matrix counts stay honest.
+        dl_probs_arr = np.asarray(dl_probs, dtype=float) if "dl_probs" in locals() else np.array([])
+        if dl_probs_arr.shape[0] == eval_y.shape[0]:
+            eval_probs["dl_model"] = dl_probs_arr
+        else:
+            # Score the full X_te through the saved DL model to obtain a
+            # comparable probability vector. This stays inside the same
+            # holdout test split (no leakage) and produces the per-customer
+            # matrix the dashboard renders.
+            try:
+                dl_full_probs = _safe_predict_proba(dl, X_te)
+                if np.asarray(dl_full_probs).shape[0] == eval_y.shape[0]:
+                    eval_probs["dl_model"] = np.asarray(dl_full_probs, dtype=float)
+            except Exception as dl_exc:
+                logger.warning("DL probability re-score for eval artifacts failed: %s", dl_exc)
+        ens_probs_arr = np.asarray(ens_probs, dtype=float)
+        if ens_probs_arr.shape[0] == eval_y.shape[0]:
+            eval_probs["ensemble"] = ens_probs_arr
+        eval_summary = _save_evaluation_artifacts(
+            results_dir=results_dir,
+            config=config,
+            y_test=eval_y,
+            model_probs=eval_probs,
+        )
+        results["evaluation_artifacts"] = eval_summary
+        logger.info(
+            "Saved evaluation artifacts: cm=%s roc=%s (n=%d)",
+            eval_summary.get("confusion_matrices"),
+            eval_summary.get("roc_data"),
+            eval_summary.get("n_test_samples"),
+        )
+    except Exception as exc:
+        logger.warning("Evaluation artifact emission failed: %s", exc)
+        results["evaluation_artifacts"] = {"status": "failed", "error": str(exc)}
 
     _save_result_and_artifact(results, results_dir / "model_metrics.json", config)
     perf_row = pd.DataFrame([
@@ -2289,6 +2545,92 @@ def run_survival(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, 
         out["concordance_index"] = float(model.cox_model.concordance_index_)
 
     model.save(str(models_dir / "survival_model.pkl"))
+
+    # ── Dashboard survival artifacts ──────────────────────────────────────
+    # Emit per-customer survival_data.csv + per-segment Kaplan-Meier curves
+    # so the dashboard reads real Cox PH inference output instead of
+    # falling back to `_generate_sample_survival_curves` (synthetic decay).
+    try:
+        cid_series: pd.Series
+        if "customer_id" in customers.columns and len(customers) >= len(X):
+            cid_series = customers["customer_id"].iloc[:len(X)].reset_index(drop=True)
+        elif "customer_id" in features.columns and len(features) >= len(X):
+            cid_series = features["customer_id"].iloc[:len(X)].reset_index(drop=True)
+        else:
+            cid_series = pd.Series([f"C{i:06d}" for i in range(len(X))])
+
+        # Segment: prefer persona from customers, else 'all'
+        seg_series: Optional[pd.Series]
+        if "persona" in customers.columns and len(customers) >= len(X):
+            seg_series = customers["persona"].iloc[:len(X)].reset_index(drop=True)
+        elif "segment" in features.columns and len(features) >= len(X):
+            seg_series = features["segment"].iloc[:len(X)].reset_index(drop=True)
+        else:
+            seg_series = None
+
+        export_info = model.export_dashboard_artifacts(
+            X=X[surv_feats],
+            duration=duration.reset_index(drop=True),
+            event=event.reset_index(drop=True),
+            customer_ids=cid_series,
+            segments=seg_series,
+            survival_data_path=results_dir / "survival_data.csv",
+            survival_curves_path=results_dir / "survival_curves.json",
+        )
+        # Mirror to dashboard artifacts dir
+        _publish_artifact(config, results_dir / "survival_data.csv")
+        _publish_artifact(config, results_dir / "survival_curves.json")
+        out["dashboard_survival_artifacts"] = export_info
+        logger.info(
+            "Survival artifacts emitted: %d rows, %d segments",
+            export_info.get("survival_data_rows", 0),
+            len(export_info.get("survival_curves_segments", []) or []),
+        )
+    except Exception as exc:
+        logger.warning("Survival dashboard artifact emission failed: %s", exc)
+        # Graceful degraded mode: write minimal feature-derived survival_data
+        # so the dashboard still has a real artifact (not _generate_sample_*).
+        try:
+            cid_fallback = (
+                customers["customer_id"].iloc[:len(X)].reset_index(drop=True)
+                if "customer_id" in customers.columns and len(customers) >= len(X)
+                else pd.Series([f"C{i:06d}" for i in range(len(X))])
+            )
+            seg_fallback = (
+                customers["persona"].iloc[:len(X)].reset_index(drop=True)
+                if "persona" in customers.columns and len(customers) >= len(X)
+                else pd.Series(["all"] * len(X))
+            )
+            degraded = pd.DataFrame({
+                "customer_id": cid_fallback.values,
+                "duration_days": np.asarray(duration, dtype=float),
+                "event_observed": np.asarray(event, dtype=int),
+                "predicted_median_survival_days": np.nan,
+                "survival_prob_30d": np.nan,
+                "survival_prob_90d": np.nan,
+                "survival_prob_365d": np.nan,
+                "segment": seg_fallback.fillna("unknown").values,
+                "survival_probability": np.nan,
+                "data_source": "feature_derived",
+            })
+            _save_result_and_artifact(
+                degraded, results_dir / "survival_data.csv", config,
+            )
+            _save_result_and_artifact(
+                {}, results_dir / "survival_curves.json", config,
+            )
+            out["dashboard_survival_artifacts"] = {
+                "status": "degraded",
+                "data_source": "feature_derived",
+                "error": str(exc),
+            }
+        except Exception as exc2:
+            logger.warning("Degraded survival export also failed: %s", exc2)
+            out["dashboard_survival_artifacts"] = {
+                "status": "failed",
+                "error": f"{exc}; {exc2}",
+            }
+
     _save_result_and_artifact(out, results_dir / "survival_results.json", config)
     logger.info("Survival analysis complete. C-index=%.4f",
                 out.get("concordance_index", 0))
@@ -2384,7 +2726,81 @@ def run_recommend(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str,
     _save_result_and_artifact(recs, results_dir / "recommendations.csv", config)
     logger.info("Recommendations saved (%d rows).", len(recs))
 
-    return {"mode": "recommend", "status": "completed", "num_recommendations": len(recs)}
+    # ── Dashboard retention offers ────────────────────────────────────────
+    # Project the recommendation frame onto the retention_offers schema the
+    # dashboard's Page 09 / 13b expects. Replaces the silent fall-back to
+    # `_generate_sample_retention_offers` (50-row np.random fixture).
+    retention_summary: Dict[str, Any] = {"status": "skipped", "rows": 0}
+    try:
+        offers = engine.to_retention_offers(recs, inp)
+        _save_result_and_artifact(
+            offers, results_dir / "retention_offers.csv", config,
+        )
+        retention_summary = {
+            "status": "completed",
+            "rows": int(len(offers)),
+            "data_source": "recommendations_pipeline",
+        }
+        logger.info("Retention offers saved (%d rows).", len(offers))
+    except Exception as exc:
+        logger.warning("Retention offer export failed: %s", exc)
+        retention_summary = {"status": "failed", "error": str(exc)}
+
+    # ── Dashboard scoring history slice ───────────────────────────────────
+    # Build scoring_history.csv from churn_predictions.csv plus retention
+    # recommendations so the "Total Scores" KPI on Page 13a is anchored to
+    # real model output instead of the n=200 np.random fixture.
+    scoring_summary: Dict[str, Any] = {"status": "skipped", "rows": 0}
+    try:
+        predictions_path = results_dir / "churn_predictions.csv"
+        if predictions_path.exists():
+            preds = pd.read_csv(predictions_path)
+            # Enrich with recommended_action when available
+            if not recs.empty and "customer_id" in recs.columns:
+                action_view = recs[
+                    [c for c in ["customer_id", "recommendation_type", "action_type"] if c in recs.columns]
+                ].copy()
+                action_view["customer_id"] = action_view["customer_id"].astype(str)
+                preds["customer_id"] = preds["customer_id"].astype(str)
+                preds = preds.merge(action_view, on="customer_id", how="left")
+                preds["recommended_action"] = preds.get(
+                    "recommendation_type",
+                    preds.get("action_type", pd.Series("standard_loyalty_program", index=preds.index)),
+                ).fillna("standard_loyalty_program")
+            # Attach predicted_clv if clv data exists
+            clv_path = results_dir / "clv_predictions.csv"
+            if clv_path.exists():
+                cdf = pd.read_csv(clv_path)[["customer_id", "predicted_clv"]]
+                cdf["customer_id"] = cdf["customer_id"].astype(str)
+                preds["customer_id"] = preds["customer_id"].astype(str)
+                preds = preds.merge(cdf, on="customer_id", how="left")
+            scoring_summary = _save_scoring_history_artifact(
+                results_dir=results_dir,
+                config=config,
+                predictions=preds,
+                n_rows=200,
+            )
+            logger.info(
+                "Scoring history saved (%s rows, source=%s).",
+                scoring_summary.get("rows"),
+                scoring_summary.get("data_source"),
+            )
+        else:
+            scoring_summary = {
+                "status": "skipped",
+                "reason": "churn_predictions_missing",
+            }
+    except Exception as exc:
+        logger.warning("Scoring history export failed: %s", exc)
+        scoring_summary = {"status": "failed", "error": str(exc)}
+
+    return {
+        "mode": "recommend",
+        "status": "completed",
+        "num_recommendations": len(recs),
+        "retention_offers": retention_summary,
+        "scoring_history": scoring_summary,
+    }
 
 
 def run_cohort(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
@@ -2921,9 +3337,42 @@ def run_monitor(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
     logger.info("Monitoring: PSI alerts=%d, KS alerts=%d",
                 len(report["psi"]["alerts"]), len(report["ks"]["alerts"]))
 
+    # ── Dashboard drift history (append-only) ─────────────────────────────
+    # Emit one row per drift-checked feature plus a synthetic __overall__
+    # summary row so the dashboard's drift trend view reads real PSI/KS
+    # numbers instead of reconstructing them from monitoring_report.json.
+    drift_summary: Dict[str, Any] = {"status": "skipped"}
+    try:
+        from src.monitoring.monitoring_service import append_drift_history
+
+        drift_path = results_dir / "drift_history.csv"
+        new_rows = append_drift_history(
+            history_path=drift_path,
+            monitoring_report=report,
+            psi_yellow_threshold=drift_cfg.get("yellow_threshold", 0.10),
+            psi_red_threshold=drift_cfg.get("red_threshold", 0.25),
+            ks_threshold=ks_cfg.get("drift_threshold", 0.01),
+        )
+        _publish_artifact(config, drift_path)
+        drift_summary = {
+            "status": "completed",
+            "appended_rows": int(len(new_rows)),
+            "is_initial_check": bool(new_rows["is_initial_check"].any())
+            if not new_rows.empty else False,
+        }
+        logger.info(
+            "Drift history appended (%d rows, initial=%s)",
+            drift_summary["appended_rows"],
+            drift_summary["is_initial_check"],
+        )
+    except Exception as exc:
+        logger.warning("Drift history append failed: %s", exc)
+        drift_summary = {"status": "failed", "error": str(exc)}
+
     return {"mode": "monitor", "status": "completed",
             "psi_alerts": len(report["psi"]["alerts"]),
-            "ks_alerts": len(report["ks"]["alerts"])}
+            "ks_alerts": len(report["ks"]["alerts"]),
+            "drift_history": drift_summary}
 
 
 def run_dashboard(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
